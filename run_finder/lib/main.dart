@@ -563,12 +563,12 @@ class _MyHomePageState extends State<MyHomePage> {
                         decoration: const InputDecoration(
                           labelText: 'Goal Distance:',
                         ),
-                        keyboardType: const TextInputType.numberWithOptions(decimal: true, signed: true),
+                        keyboardType: const TextInputType.numberWithOptions(decimal: true),
                         controller: myController,
                         onSubmitted: (value) {
                           _findRun();
                         },
-                        focusNode: focusNode1,
+                        
                       ),
                     ),
 
