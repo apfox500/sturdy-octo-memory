@@ -559,7 +559,7 @@ class _MyHomePageState extends State<MyHomePage> {
                   : //Distance mode
                   SizedBox(
                       width: 300,
-                      child: TextField(
+                      child: TextFormField(
                         decoration: const InputDecoration(
                           labelText: 'Goal Distance:',
                         ),
