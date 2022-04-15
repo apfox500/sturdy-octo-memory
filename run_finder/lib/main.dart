@@ -1,28 +1,33 @@
-//Imports for syncing with google spreadsheets
-//TODO: make accounts and accoount types(admin, runners for a team, team organizer/coach)
+//TODO: make accoount types(admin, runners for a team, team organizer/coach)
 //TODO: add in a map feature and all that comes out of it - sister runs, starting places, add ons, etc.
 // ignore: todo
 //TODO: get someone(mimi maybe?) to make better art and pictures and an app icon
 //TODO: place for coach to assign runs
-
-// ignore_for_file: empty_catches
-
+//ignore_for_file: empty_catches
+//TODO: Comment everyhting, make it have proper practice
+//TODO: make all global values into a seperate file
+//TODO: make each page it's own file bc thats what youre supposed to do i think
+import 'dart:async';
 import 'package:flutter/gestures.dart';
 import 'package:flutter/material.dart';
-import 'package:multi_select_flutter/multi_select_flutter.dart';
 import 'dart:core';
-import 'package:shared_preferences/shared_preferences.dart';
 import 'package:table_calendar/table_calendar.dart';
 import 'package:url_launcher/url_launcher.dart';
-import 'dart:convert' show json;
-import 'package:http/http.dart' as http;
 import 'keyboardoverlay.dart';
 import 'package:flutter/services.dart';
 import 'dart:math' as math;
 import 'dart:collection';
 import 'package:geolocator/geolocator.dart';
+import 'dart:io' show Platform;
+import 'package:sliding_up_panel/sliding_up_panel.dart';
+import 'package:firebase_core/firebase_core.dart';
+import 'firebase_options.dart';
+import 'package:cloud_firestore/cloud_firestore.dart';
+import 'package:firebase_auth/firebase_auth.dart';
+import 'login.dart';
+import 'team.dart';
 
-//Variables to be changed in settings
+//Global Variables
 String _defaultStart = startingPlaces.keys.toList()[0];
 double desiredMargin = .25;
 double maxMargin = .5;
@@ -31,50 +36,57 @@ String runStartInput = _defaultStart;
 bool timePace = false;
 bool darkMode = false;
 int minRuns = 3;
-
-//random variables I want to be global
-//oB = out (and) Back
-// ignore: prefer_typing_uninitialized_variables
-late final prefs;
-String oB = "Both";
+String outAndBack = "Both";
 String type = "Normal Run";
 bool warmUp = false;
 List<String> oBValues = ["Loops", "Both", "Out and Back Only"];
 List<String> runTypeValues = ["Normal Run", "Warmup Only", "Hillsprint Only"];
-String downText = (justDown)
-    ? 'Look for shorter and longer runs'
-    : 'Only look for shorter runs';
+String downText = (justDown) ? 'Look for shorter and longer runs' : 'Only look for shorter runs';
 List<Run> choosen = [];
 List<Run> allRunsList = [];
 List<String> favorites = [];
 List<String> hateds = ["898413", "898402", "898401"];
-Map<String, List<String>> startingPlaces = {
-  "Grandview": ["39.5895", "-104.7472"]
-};
+Map<String, List<String>> startingPlaces = {};
 final kToday = DateTime.now();
 final kFirstDay = DateTime(kToday.year, kToday.month - 3, kToday.day);
 final kLastDay = DateTime(kToday.year, kToday.month + 3, kToday.day);
+LinkedHashMap<DateTime, dynamic> kPlans = LinkedHashMap(equals: isSameDay, hashCode: getHashCode);
+late Timer timer;
+FirebaseFirestore firestore = FirebaseFirestore.instance;
+bool coach = false;
+String team = "None";
+String group = "None";
+
 void main() async {
+  //Many thing have told me to do this, like firebase/cloud stuff
   WidgetsFlutterBinding.ensureInitialized();
-  final prefs = await SharedPreferences.getInstance();
-  desiredMargin = prefs.getDouble('desiredMargin') ?? .25;
-  _defaultStart =
-      prefs.getString('_defaultStart') ?? startingPlaces.keys.toList()[0];
-  maxMargin = prefs.getDouble('maxMargin') ?? .5;
-  justDown = prefs.getBool('justDown') ?? false;
-  minRuns = prefs.getInt('minRuns') ?? 3;
-  favorites = prefs.getStringList('favorites') ?? [];
-  hateds = prefs.getStringList('hateds') ?? ["898413", "898402", "898401"];
+  //Make sure the app isnt an empty white screen for like hours
+  timer = Timer(const Duration(seconds: 15), () {
+    timer.cancel();
+    wontSync();
+  });
+  //Initilize firebase
+  await Firebase.initializeApp(
+    options: DefaultFirebaseOptions.currentPlatform,
+  );
+
+  //Get preferences from profile(if logged in)
+  if (FirebaseAuth.instance.currentUser != null) {
+    syncFromProfile();
+  }
 
   allRunsList = await fetchRun();
-
   startingPlaces = getStartingPlaces();
-
-  runApp(const MaterialApp(
-    debugShowCheckedModeBanner: false,
-    home: (MyApp()),
-  ));
+  _syncFavsandHats();
+  allRunsList.sort();
   runStartInput = _defaultStart;
+  if (timer.isActive) {
+    runApp(const MaterialApp(
+      debugShowCheckedModeBanner: false,
+      home: (MyApp()),
+    ));
+  }
+  timer.cancel();
 }
 
 Map<String, List<String>> getStartingPlaces() {
@@ -94,6 +106,7 @@ class MyApp extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     return MaterialApp(
+      debugShowCheckedModeBanner: false,
       title: 'Run Finder',
       theme: ThemeData(
         brightness: Brightness.light,
@@ -101,7 +114,9 @@ class MyApp extends StatelessWidget {
       ),
       darkTheme: ThemeData(
         brightness: Brightness.dark,
-        primaryColor: Colors.blueGrey,
+        colorSchemeSeed: Color.fromARGB(255, 24, 149, 233),
+
+        //Floating action buttons use colorshceme.secondary
       ),
       home: const MyHomePage(title: 'RunFinder'),
     );
@@ -135,10 +150,8 @@ class _MyHomePageState extends State<MyHomePage> {
   final FocusNode focusNode1 = FocusNode();
   final FocusNode focusNode2 = FocusNode();
 
-  List<String> surfaceList = ['Sidewalk', 'Road', 'Dirt'];
-  List<String> selectedSurfaces = [];
-  List<String> steepnessList = ['Flat', 'Medium', 'Steep', 'Everest'];
-  List<String> selectedSteepness = [];
+  List<String> selectedSurfaces = ['Road', 'Sidewalk', 'Dirt'];
+  List<String> selectedSteepness = ['Flat', 'Medium', 'Steep', 'Everest'];
   @override
   void dispose() {
     // Clean up the controller when the widget is disposed.
@@ -151,7 +164,7 @@ class _MyHomePageState extends State<MyHomePage> {
     super.initState();
     focusNode1.addListener(() {
       bool hasFocus = focusNode1.hasFocus;
-      if (hasFocus) {
+      if (hasFocus && !Platform.isMacOS) {
         KeyboardOverlay.showOverlay(context);
       } else {
         KeyboardOverlay.removeOverlay();
@@ -159,7 +172,7 @@ class _MyHomePageState extends State<MyHomePage> {
     });
     focusNode2.addListener(() {
       bool hasFocus = focusNode2.hasFocus;
-      if (hasFocus) {
+      if (hasFocus && !Platform.isMacOS) {
         KeyboardOverlay.showOverlay(context);
       } else {
         KeyboardOverlay.removeOverlay();
@@ -183,60 +196,73 @@ class _MyHomePageState extends State<MyHomePage> {
             int.parse(lengthStr.substring(3, 5)) / 60.0 +
             int.parse(lengthStr.substring(6, 8)) / 3600.0;
         //find the pace in mph
-        double pace = 60.0 / int.parse(paceStr.substring(3, 5)) +
-            int.parse(paceStr.substring(6, 8));
+        double pace = 60.0 / int.parse(paceStr.substring(3, 5)) + int.parse(paceStr.substring(6, 8));
         distance = length * pace;
       } else {
         distance = double.parse(myController.text);
       }
       double margin = 0;
       //If they selected Loops only
-      if (oB == "Loops") {
+      if (outAndBack == "Loops") {
         while (margin <= desiredMargin + .01 ||
             (margin <= maxMargin + .01 && choosen.length < minRuns)) {
           for (Run run in allRunsList) {
-            //Make sure you start in the right place and its not an out and back
-            if (run.start.keys.toString() == ("(" + runStartInput + ")") &&
-                run.loop) {
-              //If they selected Normal Run
-              if (type == "Normal Run" && !run.hill) {
-                //See if they selected shorter runs only
-                if (justDown) {
-                  //see if it is within the margin of error
-                  if (run.distance >= (distance - margin) &&
-                      run.distance <= (distance + margin)) {
-                    //make sure there wont be any repeats
-                    if (!choosen.contains(run)) {
-                      choosen.add(run);
+            bool goodSurface = true;
+            bool goodSteepness = true;
+            for (String surface in run.surfaces) {
+              if (!selectedSurfaces.contains(surface)) {
+                goodSurface = false;
+              }
+            }
+            if (run.steepness < 45) {
+              goodSteepness = selectedSteepness.contains('Flat');
+            } else if (run.steepness < 75) {
+              goodSteepness = selectedSteepness.contains('Medium');
+            } else if (run.steepness < 125) {
+              goodSteepness = selectedSteepness.contains('Steep');
+            } else {
+              goodSteepness = selectedSteepness.contains('Everest');
+            }
+
+            if (goodSteepness && goodSurface) {
+              //Make sure you start in the right place and its not an out and back
+              if (run.start.keys.toString() == ("(" + runStartInput + ")") && run.loop) {
+                //If they selected Normal Run
+                if (type == "Normal Run" && !run.hill) {
+                  //See if they selected shorter runs only
+                  if (justDown) {
+                    //see if it is within the margin of error
+                    if (run.distance >= (distance - margin) && run.distance <= (distance + margin)) {
+                      //make sure there wont be any repeats
+                      if (!choosen.contains(run)) {
+                        choosen.add(run);
+                      }
+                    }
+                  } else {
+                    if (run.distance >= (distance - margin) && run.distance <= (distance)) {
+                      //make sure there wont be any repeats
+                      if (!choosen.contains(run)) {
+                        choosen.add(run);
+                      }
                     }
                   }
-                } else {
-                  if (run.distance >= (distance - margin) &&
-                      run.distance <= (distance)) {
-                    //make sure there wont be any repeats
-                    if (!choosen.contains(run)) {
-                      choosen.add(run);
+                  //If they selected Warmup
+                } else if (type == "Warmup Only" && run.warmUp) {
+                  //See if they selected shorter runs only
+                  if (justDown) {
+                    //see if it is within the margin of error
+                    if (run.distance >= (distance - margin) && run.distance <= (distance + margin)) {
+                      //make sure there wont be any repeats
+                      if (!choosen.contains(run)) {
+                        choosen.add(run);
+                      }
                     }
-                  }
-                }
-                //If they selected Warmup
-              } else if (type == "Warmup Only" && run.warmUp) {
-                //See if they selected shorter runs only
-                if (justDown) {
-                  //see if it is within the margin of error
-                  if (run.distance >= (distance - margin) &&
-                      run.distance <= (distance + margin)) {
-                    //make sure there wont be any repeats
-                    if (!choosen.contains(run)) {
-                      choosen.add(run);
-                    }
-                  }
-                } else {
-                  if (run.distance >= (distance - margin) &&
-                      run.distance <= (distance)) {
-                    //make sure there wont be any repeats
-                    if (!choosen.contains(run)) {
-                      choosen.add(run);
+                  } else {
+                    if (run.distance >= (distance - margin) && run.distance <= (distance)) {
+                      //make sure there wont be any repeats
+                      if (!choosen.contains(run)) {
+                        choosen.add(run);
+                      }
                     }
                   }
                 }
@@ -246,108 +272,124 @@ class _MyHomePageState extends State<MyHomePage> {
           margin += .01;
         }
       } //Both out and backs and loops
-      else if (oB == "Both") {
+      else if (outAndBack == "Both") {
         while (margin <= desiredMargin + .01 ||
             (margin <= maxMargin + .01 && choosen.length < minRuns)) {
           for (Run run in allRunsList) {
-            //Make sure you start in the right place
-            if (run.start.keys.toString() == ("(" + runStartInput + ")")) {
-              //If they selected Normal Run
-              if (type == "Normal Run" && !run.hill) {
-                //If its a loop
-                if (run.loop) {
-                  //See if they selected shorter runs only
-                  if (justDown) {
-                    //see if it is within the margin of error
-                    if (run.distance >= (distance - margin) &&
-                        run.distance <= (distance + margin)) {
-                      //make sure there wont be any repeats
-                      if (!choosen.contains(run)) {
-                        choosen.add(run);
+            bool goodSurface = true;
+            bool goodSteepness = true;
+            for (String surface in run.surfaces) {
+              if (!selectedSurfaces.contains(surface)) {
+                goodSurface = false;
+              }
+            }
+            if (run.steepness < 45) {
+              goodSteepness = selectedSteepness.contains('Flat');
+            } else if (run.steepness < 75) {
+              goodSteepness = selectedSteepness.contains('Medium');
+            } else if (run.steepness < 125) {
+              goodSteepness = selectedSteepness.contains('Steep');
+            } else {
+              goodSteepness = selectedSteepness.contains('Everest');
+            }
+
+            if (goodSteepness && goodSurface) {
+              //Make sure you start in the right place
+              if (run.start.keys.toString() == ("(" + runStartInput + ")")) {
+                //If they selected Normal Run
+                if (type == "Normal Run" && !run.hill) {
+                  //If its a loop
+                  if (run.loop) {
+                    //See if they selected shorter runs only
+                    if (justDown) {
+                      //see if it is within the margin of error
+                      if (run.distance >= (distance - margin) &&
+                          run.distance <= (distance + margin)) {
+                        //make sure there wont be any repeats
+                        if (!choosen.contains(run)) {
+                          choosen.add(run);
+                        }
+                      }
+                    } else {
+                      if (run.distance >= (distance - margin) && run.distance <= (distance)) {
+                        //make sure there wont be any repeats
+                        if (!choosen.contains(run)) {
+                          choosen.add(run);
+                        }
                       }
                     }
+                    //If its an out and back
                   } else {
-                    if (run.distance >= (distance - margin) &&
-                        run.distance <= (distance)) {
+                    //See if the run fits
+                    if (distance / 2.0 <= run.distance) {
                       //make sure there wont be any repeats
                       if (!choosen.contains(run)) {
                         choosen.add(run);
                       }
                     }
                   }
-                  //If its an out and back
-                } else {
-                  //See if the run fits
-                  if (distance / 2.0 <= run.distance) {
-                    //make sure there wont be any repeats
-                    if (!choosen.contains(run)) {
-                      choosen.add(run);
+                  //If they selected Warmup
+                } else if (type == "Warmup Only" && run.warmUp) {
+                  //If its a loop
+                  if (run.loop) {
+                    //See if they selected shorter runs only
+                    if (justDown) {
+                      //see if it is within the margin of error
+                      if (run.distance >= (distance - margin) &&
+                          run.distance <= (distance + margin)) {
+                        //make sure there wont be any repeats
+                        if (!choosen.contains(run)) {
+                          choosen.add(run);
+                        }
+                      }
+                    } else {
+                      if (run.distance >= (distance - margin) && run.distance <= (distance)) {
+                        //make sure there wont be any repeats
+                        if (!choosen.contains(run)) {
+                          choosen.add(run);
+                        }
+                      }
                     }
-                  }
-                }
-                //If they selected Warmup
-              } else if (type == "Warmup Only" && run.warmUp) {
-                //If its a loop
-                if (run.loop) {
-                  //See if they selected shorter runs only
-                  if (justDown) {
-                    //see if it is within the margin of error
-                    if (run.distance >= (distance - margin) &&
-                        run.distance <= (distance + margin)) {
+                  } //If its an out and back
+                  else {
+                    //See if the run fits
+                    if (distance / 2.0 <= run.distance) {
                       //make sure there wont be any repeats
                       if (!choosen.contains(run)) {
                         choosen.add(run);
                       }
                     }
+                  }
+                  //If they selected Hill sprint only
+                } else if (type == "Hillsprint Only" && run.hill) {
+                  //If its a loop
+                  if (run.loop) {
+                    //See if they selected shorter runs only
+                    if (justDown) {
+                      //see if it is within the margin of error
+                      if (run.distance >= (distance - margin) &&
+                          run.distance <= (distance + margin)) {
+                        //make sure there wont be any repeats
+                        if (!choosen.contains(run)) {
+                          choosen.add(run);
+                        }
+                      }
+                    } else {
+                      if (run.distance >= (distance - margin) && run.distance <= (distance)) {
+                        //make sure there wont be any repeats
+                        if (!choosen.contains(run)) {
+                          choosen.add(run);
+                        }
+                      }
+                    }
+                    //If its an out and back
                   } else {
-                    if (run.distance >= (distance - margin) &&
-                        run.distance <= (distance)) {
+                    //See if the run fits
+                    if (distance / 2.0 <= run.distance) {
                       //make sure there wont be any repeats
                       if (!choosen.contains(run)) {
                         choosen.add(run);
                       }
-                    }
-                  }
-                } //If its an out and back
-                else {
-                  //See if the run fits
-                  if (distance / 2.0 <= run.distance) {
-                    //make sure there wont be any repeats
-                    if (!choosen.contains(run)) {
-                      choosen.add(run);
-                    }
-                  }
-                }
-                //If they selected Hill sprint only
-              } else if (type == "Hillsprint Only" && run.hill) {
-                //If its a loop
-                if (run.loop) {
-                  //See if they selected shorter runs only
-                  if (justDown) {
-                    //see if it is within the margin of error
-                    if (run.distance >= (distance - margin) &&
-                        run.distance <= (distance + margin)) {
-                      //make sure there wont be any repeats
-                      if (!choosen.contains(run)) {
-                        choosen.add(run);
-                      }
-                    }
-                  } else {
-                    if (run.distance >= (distance - margin) &&
-                        run.distance <= (distance)) {
-                      //make sure there wont be any repeats
-                      if (!choosen.contains(run)) {
-                        choosen.add(run);
-                      }
-                    }
-                  }
-                  //If its an out and back
-                } else {
-                  //See if the run fits
-                  if (distance / 2.0 <= run.distance) {
-                    //make sure there wont be any repeats
-                    if (!choosen.contains(run)) {
-                      choosen.add(run);
                     }
                   }
                 }
@@ -359,46 +401,84 @@ class _MyHomePageState extends State<MyHomePage> {
       } //Just out and backs
       else {
         for (Run run in allRunsList) {
-          //Make sure you start in the right place
-          if (run.start.keys.toString() == ("(" + runStartInput + ")") &&
-              !run.loop) {
-            //If they selected Normal Run
-            if (type == "Normal Run" && !run.hill) {
-              //See if the run fits
-              if (distance / 2.0 <= run.distance) {
-                //make sure there wont be any repeats
-                if (!choosen.contains(run)) {
-                  choosen.add(run);
+          bool goodSurface = true;
+          bool goodSteepness = true;
+          for (String surface in run.surfaces) {
+            if (!selectedSurfaces.contains(surface)) {
+              goodSurface = false;
+            }
+          }
+          if (run.steepness < 45) {
+            goodSteepness = selectedSteepness.contains('Flat');
+          } else if (run.steepness < 75) {
+            goodSteepness = selectedSteepness.contains('Medium');
+          } else if (run.steepness < 125) {
+            goodSteepness = selectedSteepness.contains('Steep');
+          } else {
+            goodSteepness = selectedSteepness.contains('Everest');
+          }
+
+          if (goodSteepness && goodSurface) {
+            //Make sure you start in the right place
+            if (run.start.keys.toString() == ("(" + runStartInput + ")") && !run.loop) {
+              //If they selected Normal Run
+              if (type == "Normal Run" && !run.hill) {
+                //See if the run fits
+                if (distance / 2.0 <= run.distance) {
+                  //make sure there wont be any repeats
+                  if (!choosen.contains(run)) {
+                    choosen.add(run);
+                  }
                 }
-              }
-              //If they selected Warmup
-            } else if (type == "Warmup Only" && run.warmUp) {
-              //See if the run fits
-              if (distance / 2.0 <= run.distance) {
-                //make sure there wont be any repeats
-                if (!choosen.contains(run)) {
-                  choosen.add(run);
+                //If they selected Warmup
+              } else if (type == "Warmup Only" && run.warmUp) {
+                //See if the run fits
+                if (distance / 2.0 <= run.distance) {
+                  //make sure there wont be any repeats
+                  if (!choosen.contains(run)) {
+                    choosen.add(run);
+                  }
                 }
-              }
-              //If they selected Hill sprint only
-            } else if (type == "Hillsprint Only" && run.hill) {
-              //See if the run fits
-              if (distance / 2.0 <= run.distance) {
-                //make sure there wont be any repeats
-                if (!choosen.contains(run)) {
-                  choosen.add(run);
+                //If they selected Hill sprint only
+              } else if (type == "Hillsprint Only" && run.hill) {
+                //See if the run fits
+                if (distance / 2.0 <= run.distance) {
+                  //make sure there wont be any repeats
+                  if (!choosen.contains(run)) {
+                    choosen.add(run);
+                  }
                 }
               }
             }
           }
         }
       }
-      choosen.sort();
-      //Go to second Screen:
-      Navigator.push(
-        context,
-        MaterialPageRoute(builder: (context) => const HomeScreenSecondScreen()),
-      );
+      if (choosen.isEmpty) {
+        showDialog(
+            context: context,
+            builder: (BuildContext context) {
+              return AlertDialog(
+                title: const Text("No runs:("),
+                content: const Text("Check your inputs, maybe widen your search."),
+                actions: [
+                  TextButton(
+                    child: const Text("OK"),
+                    onPressed: () {
+                      Navigator.of(context).pop();
+                    },
+                  ),
+                ],
+              );
+            });
+      } else {
+        choosen.sort();
+
+        //Go to second Screen:
+        Navigator.push(
+          context,
+          MaterialPageRoute(builder: (context) => const ChoosenRunScreen()),
+        );
+      }
     } on Exception {
       showDialog(
           context: context,
@@ -450,8 +530,7 @@ class _MyHomePageState extends State<MyHomePage> {
             image: DecorationImage(
                 fit: BoxFit.fitHeight,
                 invertColors: false,
-                colorFilter: ColorFilter.mode(
-                    Colors.black.withOpacity(0.1), BlendMode.dstATop),
+                colorFilter: ColorFilter.mode(Colors.black.withOpacity(0.1), BlendMode.dstATop),
                 image: const AssetImage('assets/Map.jpeg')),
           ),
           child: Column(
@@ -470,8 +549,9 @@ class _MyHomePageState extends State<MyHomePage> {
                 children: <Widget>[
                   //Get current location and automatically choose a starting place
                   IconButton(
+                      tooltip: "Use Current Location",
                       onPressed: () async {
-                        String update = "";
+                        String update = runStartInput;
                         Position pos = await _determinePosition();
                         for (String start in startingPlaces.keys) {
                           if (Geolocator.distanceBetween(
@@ -501,9 +581,7 @@ class _MyHomePageState extends State<MyHomePage> {
                         runStartInput = newValue!;
                       });
                     },
-                    items: startingPlaces.keys
-                        .toList()
-                        .map<DropdownMenuItem<String>>((String value) {
+                    items: startingPlaces.keys.toList().map<DropdownMenuItem<String>>((String value) {
                       return DropdownMenuItem<String>(
                         value: value,
                         child: Text(value),
@@ -527,8 +605,7 @@ class _MyHomePageState extends State<MyHomePage> {
                           width: 150,
                           child: TextFormField(
                             controller: timeController,
-                            keyboardType: const TextInputType.numberWithOptions(
-                                decimal: false),
+                            keyboardType: const TextInputType.numberWithOptions(decimal: false),
                             decoration: const InputDecoration(
                               hintText: '00:00:00',
                               labelText: "Time: ",
@@ -543,8 +620,7 @@ class _MyHomePageState extends State<MyHomePage> {
                           width: 150,
                           child: TextFormField(
                             controller: paceController,
-                            keyboardType: const TextInputType.numberWithOptions(
-                                decimal: false),
+                            keyboardType: const TextInputType.numberWithOptions(decimal: false),
                             decoration: const InputDecoration(
                               hintText: '00:00:00',
                               labelText: "Pace: ",
@@ -557,20 +633,34 @@ class _MyHomePageState extends State<MyHomePage> {
                       ],
                     )
                   : //Distance mode
-                  SizedBox(
-                      width: 300,
-                      child: TextField(
-                        decoration: const InputDecoration(
-                          labelText: 'Goal Distance:',
+                  Row(
+                      mainAxisAlignment: MainAxisAlignment.center,
+                      children: [
+                        SizedBox(
+                          width: 300,
+                          child: TextField(
+                            decoration: const InputDecoration(
+                              labelText: 'Goal Distance:',
+                            ),
+                            keyboardType: const TextInputType.numberWithOptions(decimal: true),
+                            controller: myController,
+                            onSubmitted: (value) {
+                              _findRun();
+                            },
+                            focusNode: focusNode1,
+                          ),
                         ),
-                        keyboardType: const TextInputType.numberWithOptions(
-                            decimal: true),
-                        controller: myController,
-                        onSubmitted: (value) {
-                          _findRun();
-                        },
-                        focusNode: focusNode1,
-                      ),
+                        Visibility(
+                            visible: (kPlans[kToday] != null && kPlans[kToday].length == 1),
+                            child: IconButton(
+                              tooltip: "Get Distance From Calendar",
+                              icon: const Icon(Icons.lightbulb),
+                              onPressed: () {
+                                myController.text = kPlans[kToday][0].distance.toString();
+                                setState(() {});
+                              },
+                            ))
+                      ],
                     ),
 
               //Padding
@@ -584,22 +674,20 @@ class _MyHomePageState extends State<MyHomePage> {
                     child: Row(
                       mainAxisAlignment: MainAxisAlignment.center,
                       children: <Widget>[
-                        //Toggle out and back(oB), loops, and both
+                        //Toggle out and back(outAndBack), loops, and both
                         DropdownButton(
-                          items: oBValues
-                              .map<DropdownMenuItem<String>>((String value) {
+                          items: oBValues.map<DropdownMenuItem<String>>((String value) {
                             return DropdownMenuItem<String>(
                               value: value,
                               child: Text(value),
                             );
                           }).toList(),
                           icon: const Icon(Icons.expand_more_rounded),
-                          value: oB,
+                          value: outAndBack,
                           onChanged: (String? value) {
                             setState(() {
-                              oB = value!;
-                              if (oB != "Out and Back Only" &&
-                                  type == "Hillsprint Only") {
+                              outAndBack = value!;
+                              if (outAndBack != "Out and Back Only" && type == "Hillsprint Only") {
                                 type = "Normal Run";
                               }
                             });
@@ -610,8 +698,7 @@ class _MyHomePageState extends State<MyHomePage> {
                         ),
                         //Toggle hill sprint, warmup, and Normal Run
                         DropdownButton(
-                          items: runTypeValues
-                              .map<DropdownMenuItem<String>>((String value) {
+                          items: runTypeValues.map<DropdownMenuItem<String>>((String value) {
                             return DropdownMenuItem<String>(
                               value: value,
                               child: Text(value),
@@ -623,7 +710,7 @@ class _MyHomePageState extends State<MyHomePage> {
                             setState(() {
                               type = value!;
                               if (type == "Hillsprint Only") {
-                                oB = "Out and Back Only";
+                                outAndBack = "Out and Back Only";
                               }
                             });
                           },
@@ -634,38 +721,205 @@ class _MyHomePageState extends State<MyHomePage> {
                   children: [
                     SizedBox(
                       width: 315,
+                      //Select surface
                       child: Row(
+                        mainAxisAlignment: MainAxisAlignment.spaceEvenly,
                         children: <Widget>[
-                          //Select surface
-                          MultiSelectDialogField(
-                            items: surfaceList
-                                .map((e) => MultiSelectItem(e, e))
-                                .toList(),
-                            listType: MultiSelectListType.CHIP,
-                            title: const Text('Surface Type'),
-                            buttonIcon: const Icon(Icons.terrain),
-                            onConfirm: (results) {
-                              //TODO: Implement functionality of surfaces
-                            },
-                            buttonText: const Text('Surface Type'),
+                          //Select Sidewalk
+                          SizedBox(
+                            width: 315 / 3,
+                            child: TextButton(
+                              onPressed: () {
+                                if (selectedSurfaces.contains("Sidewalk")) {
+                                  selectedSurfaces.remove("Sidewalk");
+                                } else {
+                                  selectedSurfaces.add("Sidewalk");
+                                }
+                                setState(() {});
+                              },
+                              child: (selectedSurfaces.contains("Sidewalk")
+                                  ? Row(
+                                      children: const [
+                                        Icon(Icons.terrain),
+                                        Text("Sidewalk"),
+                                      ],
+                                    )
+                                  : Text(
+                                      "Sidewalk",
+                                      style:
+                                          TextStyle(color: Theme.of(context).colorScheme.onPrimary),
+                                    )),
+                            ),
                           ),
-                          const SizedBox(width: 25),
-                          //Select Steepness
-                          MultiSelectDialogField(
-                            items: steepnessList
-                                .map((e) => MultiSelectItem(e, e))
-                                .toList(),
-                            listType: MultiSelectListType.CHIP,
-                            title: const Text('Steepness'),
-                            buttonIcon: const Icon(Icons.show_chart),
-                            onConfirm: (results) {
-                              //TODO: Implement functionality of steepness
-                            },
-                            buttonText: const Text('Steepness'),
+                          //Select Roads
+                          SizedBox(
+                            width: 315 / 3,
+                            child: TextButton(
+                              onPressed: () {
+                                if (selectedSurfaces.contains("Road")) {
+                                  selectedSurfaces.remove("Road");
+                                } else {
+                                  selectedSurfaces.add("Road");
+                                }
+                                setState(() {});
+                              },
+                              child: (selectedSurfaces.contains("Road")
+                                  ? Row(
+                                      children: const [
+                                        Icon(Icons.terrain),
+                                        Text("Road"),
+                                      ],
+                                    )
+                                  : Text(
+                                      "Road",
+                                      style:
+                                          TextStyle(color: Theme.of(context).colorScheme.onPrimary),
+                                    )),
+                            ),
+                          ),
+                          //Select Dirt
+                          SizedBox(
+                            width: 315 / 3,
+                            child: TextButton(
+                              onPressed: () {
+                                if (selectedSurfaces.contains("Dirt")) {
+                                  selectedSurfaces.remove("Dirt");
+                                } else {
+                                  selectedSurfaces.add("Dirt");
+                                }
+                                setState(() {});
+                              },
+                              child: (selectedSurfaces.contains("Dirt")
+                                  ? Row(
+                                      children: const [
+                                        Icon(Icons.terrain),
+                                        Text("Dirt"),
+                                      ],
+                                    )
+                                  : Text(
+                                      "Dirt",
+                                      style:
+                                          TextStyle(color: Theme.of(context).colorScheme.onPrimary),
+                                    )),
+                            ),
                           ),
                         ],
                       ),
-                    )
+                    ),
+                    SizedBox(
+                      width: 332,
+                      //Select Steepness
+                      child: Row(
+                        mainAxisAlignment: MainAxisAlignment.spaceEvenly,
+                        children: <Widget>[
+                          //Select Flat
+                          SizedBox(
+                            //width: 315 / 4.3,
+                            child: TextButton(
+                              onPressed: () {
+                                if (selectedSteepness.contains("Flat")) {
+                                  selectedSteepness.remove("Flat");
+                                } else {
+                                  selectedSteepness.add("Flat");
+                                }
+                                setState(() {});
+                              },
+                              child: (selectedSteepness.contains("Flat")
+                                  ? Row(
+                                      children: const [
+                                        Icon(Icons.north_east),
+                                        Text("Flat"),
+                                      ],
+                                    )
+                                  : Text(
+                                      "Flat",
+                                      style:
+                                          TextStyle(color: Theme.of(context).colorScheme.onPrimary),
+                                    )),
+                            ),
+                          ),
+                          //Select Medium
+                          SizedBox(
+                            //width: 315 / 3.9,
+                            child: TextButton(
+                              onPressed: () {
+                                if (selectedSteepness.contains("Medium")) {
+                                  selectedSteepness.remove("Medium");
+                                } else {
+                                  selectedSteepness.add("Medium");
+                                }
+                                setState(() {});
+                              },
+                              child: (selectedSteepness.contains("Medium")
+                                  ? Row(
+                                      children: const [
+                                        Icon(Icons.north_east),
+                                        Text("Medium"),
+                                      ],
+                                    )
+                                  : Text(
+                                      "Medium",
+                                      style:
+                                          TextStyle(color: Theme.of(context).colorScheme.onPrimary),
+                                    )),
+                            ),
+                          ),
+                          //Select Steep
+                          SizedBox(
+                            //width: 315 / 3.9,
+                            child: TextButton(
+                              onPressed: () {
+                                if (selectedSteepness.contains("Steep")) {
+                                  selectedSteepness.remove("Steep");
+                                } else {
+                                  selectedSteepness.add("Steep");
+                                }
+                                setState(() {});
+                              },
+                              child: (selectedSteepness.contains("Steep")
+                                  ? Row(
+                                      children: const [
+                                        Icon(Icons.north_east),
+                                        Text("Steep"),
+                                      ],
+                                    )
+                                  : Text(
+                                      "Steep",
+                                      style:
+                                          TextStyle(color: Theme.of(context).colorScheme.onPrimary),
+                                    )),
+                            ),
+                          ),
+                          //Select Everest
+                          SizedBox(
+                            //width: 315 / 3.9,
+                            child: TextButton(
+                              onPressed: () {
+                                if (selectedSteepness.contains("Everest")) {
+                                  selectedSteepness.remove("Everest");
+                                } else {
+                                  selectedSteepness.add("Everest");
+                                  //type = "Hillsprint Only";
+                                }
+                                setState(() {});
+                              },
+                              child: (selectedSteepness.contains("Everest")
+                                  ? Row(
+                                      children: const [
+                                        Icon(Icons.north_east),
+                                        Text("Everest"),
+                                      ],
+                                    )
+                                  : Text(
+                                      "Everest",
+                                      style:
+                                          TextStyle(color: Theme.of(context).colorScheme.onPrimary),
+                                    )),
+                            ),
+                          ),
+                        ],
+                      ),
+                    ),
                   ],
                 ),
               ),
@@ -686,16 +940,16 @@ class _MyHomePageState extends State<MyHomePage> {
 }
 
 //Second Screen:
-class HomeScreenSecondScreen extends StatefulWidget {
-  const HomeScreenSecondScreen({Key? key}) : super(key: key);
+class ChoosenRunScreen extends StatefulWidget {
+  const ChoosenRunScreen({Key? key}) : super(key: key);
 
   @override
-  State<HomeScreenSecondScreen> createState() => _HomeScreenSecondScreenState();
+  State<ChoosenRunScreen> createState() => _ChoosenRunScreenState();
 }
 
-class _HomeScreenSecondScreenState extends State<HomeScreenSecondScreen> {
-  @override
-  /*
+class _ChoosenRunScreenState extends State<ChoosenRunScreen> {
+  /*@override
+  
   void initState() {
     // ignore: undefined_prefixed_name
     ui.platformViewRegistry.registerViewFactory();
@@ -733,112 +987,89 @@ class _HomeScreenSecondScreenState extends State<HomeScreenSecondScreen> {
         decoration: BoxDecoration(
           image: DecorationImage(
               fit: BoxFit.fitHeight,
-              colorFilter: ColorFilter.mode(
-                  Colors.black.withOpacity(0.1), BlendMode.dstATop),
+              colorFilter: ColorFilter.mode(Colors.black.withOpacity(0.1), BlendMode.dstATop),
               image: const AssetImage('assets/Map.jpeg')),
         ),
         child: ListView.builder(
             itemCount: choosen.length,
             itemBuilder: (context, index) {
-              return Card(
-                elevation: 5,
-                child: Stack(
-                  children: <Widget>[
-                    Container(
-                        padding: const EdgeInsets.all(16),
-                        child: Column(
-                          crossAxisAlignment: CrossAxisAlignment.start,
-                          children: [
-                            SizedBox(
-                              width: MediaQuery.of(context).size.width * (.8),
-                              child: Text(
-                                choosen[index].runName,
-                                style: const TextStyle(
-                                    fontWeight: FontWeight.bold, fontSize: 25),
-                              ),
-                            ),
-                            Text(choosen[index].toString(includeName: false)),
-                            RichText(
-                                text: TextSpan(children: [
-                              TextSpan(
-                                text: "Route #" +
-                                    choosen[index].route.toString() +
-                                    " ",
-                              ),
-                              TextSpan(
-                                  style: const TextStyle(
-                                    //Gets to stay bc its link text
-                                    color: Colors.blue,
-                                    decoration: TextDecoration.underline,
-                                  ),
-                                  text: "Click here for more details.",
-                                  recognizer: TapGestureRecognizer()
-                                    ..onTap = () async {
-                                      var url =
-                                          "https://www.mappedometer.com/?maproute=" +
-                                              choosen[index].route.toString();
-                                      if (await canLaunch(url)) {
-                                        await launch(url);
-                                      } else {
-                                        throw 'Could not launch $url';
-                                      }
-                                    }),
-                            ])),
-                          ],
-                        )),
-                    Positioned(
-                        child: IconButton(
-                          icon: (choosen[index].favorite)
-                              ? const Icon(Icons.favorite_rounded,
-                                  color: Colors.pink)
-                              : const Icon(
-                                  Icons.favorite_border_rounded,
-                                  color: Colors.grey,
+              return InkWell(
+                onLongPress: () async {
+                  var url =
+                      "https://www.mappedometer.com/?maproute=" + choosen[index].route.toString();
+                  if (await canLaunch(url)) {
+                    await launch(url);
+                  } else {
+                    throw 'Could not launch $url';
+                  }
+                },
+                child: Card(
+                  elevation: 5,
+                  child: Stack(
+                    children: <Widget>[
+                      Container(
+                          padding: const EdgeInsets.all(16),
+                          child: Column(
+                            crossAxisAlignment: CrossAxisAlignment.start,
+                            children: [
+                              SizedBox(
+                                width: MediaQuery.of(context).size.width * (.8),
+                                child: Text(
+                                  choosen[index].runName,
+                                  style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 25),
                                 ),
+                              ),
+                              Text(choosen[index].toString(includeName: false)),
+                            ],
+                          )),
+                      Positioned(
+                          child: IconButton(
+                            icon: (choosen[index].favorite)
+                                ? const Icon(Icons.favorite_rounded, color: Colors.pink)
+                                : const Icon(
+                                    Icons.favorite_border_rounded,
+                                    color: Colors.grey,
+                                  ),
+                            onPressed: () async {
+                              choosen[index].favorite = !choosen[index].favorite;
+                              choosen[index].hated = false;
+                              if (choosen[index].favorite) {
+                                hateds.remove(choosen[index].route.toString());
+                                favorites.add(choosen[index].route.toString());
+                              } else {
+                                favorites.remove(choosen[index].route.toString());
+                              }
+                              syncToProfile();
+                              _syncFavsandHats();
+                              setState(() {});
+                            },
+                            tooltip: "Favorite",
+                          ),
+                          right: 1.0),
+                      Positioned(
+                        child: IconButton(
+                          icon: (choosen[index].hated)
+                              ? Icon(Icons.sports_kabaddi, color: Colors.red[900])
+                              : const Icon(Icons.sports_kabaddi_outlined, color: Colors.grey),
                           onPressed: () async {
-                            choosen[index].favorite = !choosen[index].favorite;
-                            choosen[index].hated = false;
-                            final prefs = await SharedPreferences.getInstance();
-                            if (choosen[index].favorite) {
-                              hateds.remove(choosen[index].route.toString());
-                              favorites.add(choosen[index].route.toString());
-                            } else {
+                            choosen[index].hated = !choosen[index].hated;
+                            choosen[index].favorite = false;
+                            if (choosen[index].hated) {
                               favorites.remove(choosen[index].route.toString());
+                              hateds.add(choosen[index].route.toString());
+                            } else {
+                              hateds.remove(choosen[index].route.toString());
                             }
-                            await prefs.setStringList('favorites', favorites);
-                            await prefs.setStringList('hateds', hateds);
+                            syncToProfile();
                             _syncFavsandHats();
                             setState(() {});
                           },
-                          tooltip: "Favorite",
+                          tooltip: "Hate",
                         ),
-                        right: 1.0),
-                    Positioned(
-                      child: IconButton(
-                        icon: (choosen[index].hated)
-                            ? Icon(Icons.sports_kabaddi, color: Colors.red[900])
-                            : const Icon(Icons.sports_kabaddi_outlined,
-                                color: Colors.grey),
-                        onPressed: () async {
-                          choosen[index].hated = !choosen[index].hated;
-                          choosen[index].favorite = false;
-                          final prefs = await SharedPreferences.getInstance();
-                          if (choosen[index].hated) {
-                            favorites.remove(choosen[index].route.toString());
-                            hateds.add(choosen[index].route.toString());
-                          } else {
-                            hateds.remove(choosen[index].route.toString());
-                          }
-                          await prefs.setStringList('favorites', favorites);
-                          await prefs.setStringList('hateds', hateds);
-                          _syncFavsandHats();
-                          setState(() {});
-                        },
-                        tooltip: "Hate",
-                      ),
-                      right: 30,
-                    )
-                  ],
+                        right: 30,
+                      )
+                    ],
+                  ),
                 ),
               );
             }),
@@ -898,7 +1129,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
 
     focusNode1.addListener(() {
       bool hasFocus = focusNode1.hasFocus;
-      if (hasFocus) {
+      if (hasFocus && !Platform.isMacOS) {
         KeyboardOverlay.showOverlay(context);
       } else {
         KeyboardOverlay.removeOverlay();
@@ -906,7 +1137,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
     });
     focusNode2.addListener(() {
       bool hasFocus = focusNode2.hasFocus;
-      if (hasFocus) {
+      if (hasFocus && !Platform.isMacOS) {
         KeyboardOverlay.showOverlay(context);
       } else {
         KeyboardOverlay.removeOverlay();
@@ -914,7 +1145,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
     });
     focusNode3.addListener(() {
       bool hasFocus = focusNode3.hasFocus;
-      if (hasFocus) {
+      if (hasFocus && !Platform.isMacOS) {
         KeyboardOverlay.showOverlay(context);
       } else {
         KeyboardOverlay.removeOverlay();
@@ -956,16 +1187,14 @@ class _SettingsScreenState extends State<SettingsScreen> {
                           height: 2,
                         ),
                         onChanged: (String? newValue) async {
-                          final prefs = await SharedPreferences.getInstance();
                           setState(() {
                             WidgetsFlutterBinding.ensureInitialized();
                             runStartInput = newValue!;
                             _defaultStart = newValue;
-                            prefs.setString('_defaultStart', newValue);
+                            syncToProfile();
                           });
                         },
-                        items: startingPlaces.keys
-                            .map<DropdownMenuItem<String>>((String value) {
+                        items: startingPlaces.keys.map<DropdownMenuItem<String>>((String value) {
                           return DropdownMenuItem<String>(
                             value: value,
                             child: Text(value),
@@ -977,8 +1206,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
                   Text(
                     'Current: ' + _defaultStart.toString(),
                     style: TextStyle(
-                        color: (MediaQuery.of(context).platformBrightness ==
-                                Brightness.dark)
+                        color: (MediaQuery.of(context).platformBrightness == Brightness.dark)
                             ? Colors.grey[400]
                             : Colors.grey[700]),
                   ),
@@ -986,7 +1214,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
                   Row(
                     mainAxisAlignment: MainAxisAlignment.spaceBetween,
                     children: <Widget>[
-                      const Text('Desired Margin of Error'),
+                      const Text('Desired Accuracy'),
                       SizedBox(
                         width: 105,
                         child: TextField(
@@ -1000,11 +1228,10 @@ class _SettingsScreenState extends State<SettingsScreen> {
                           textInputAction: TextInputAction.done,
                           focusNode: focusNode1,
                           onChanged: (value) async {
-                            final prefs = await SharedPreferences.getInstance();
                             setState(() {
                               try {
                                 desiredMargin = double.parse(value);
-                                prefs.setDouble('desiredMargin', desiredMargin);
+                                syncToProfile();
                               } on Exception {}
                             });
                           },
@@ -1013,10 +1240,9 @@ class _SettingsScreenState extends State<SettingsScreen> {
                     ],
                   ),
                   Text(
-                    'Current: ' + desiredMargin.toString(),
+                    'Current: ' + desiredMargin.toString() + " miles",
                     style: TextStyle(
-                        color: (MediaQuery.of(context).platformBrightness ==
-                                Brightness.dark)
+                        color: (MediaQuery.of(context).platformBrightness == Brightness.dark)
                             ? Colors.grey[400]
                             : Colors.grey[700]),
                   ),
@@ -1024,21 +1250,19 @@ class _SettingsScreenState extends State<SettingsScreen> {
                   Row(
                     mainAxisAlignment: MainAxisAlignment.spaceBetween,
                     children: <Widget>[
-                      const Text('Maximum Margin of Error'),
+                      const Text('Maximum Inaccuracy'),
                       SizedBox(
                         width: 105,
                         child: TextField(
                           decoration: const InputDecoration(
                             hintText: '.5',
                           ),
-                          keyboardType: const TextInputType.numberWithOptions(
-                              decimal: true),
-                          onChanged: (value) async {
-                            final prefs = await SharedPreferences.getInstance();
+                          keyboardType: const TextInputType.numberWithOptions(decimal: true),
+                          onChanged: (value) {
                             setState(() {
                               try {
                                 maxMargin = double.parse(value);
-                                prefs.setDouble('maxMargin', maxMargin);
+                                syncToProfile();
                               } on Exception {}
                             });
                           },
@@ -1049,10 +1273,9 @@ class _SettingsScreenState extends State<SettingsScreen> {
                     ],
                   ),
                   Text(
-                    'Current: ' + maxMargin.toString(),
+                    'Current: ' + maxMargin.toString() + ' miles',
                     style: TextStyle(
-                        color: (MediaQuery.of(context).platformBrightness ==
-                                Brightness.dark)
+                        color: (MediaQuery.of(context).platformBrightness == Brightness.dark)
                             ? Colors.grey[400]
                             : Colors.grey[700]),
                   ),
@@ -1067,14 +1290,12 @@ class _SettingsScreenState extends State<SettingsScreen> {
                           decoration: const InputDecoration(
                             hintText: '3',
                           ),
-                          keyboardType: const TextInputType.numberWithOptions(
-                              decimal: true),
-                          onChanged: (value) async {
-                            final prefs = await SharedPreferences.getInstance();
+                          keyboardType: const TextInputType.numberWithOptions(decimal: true),
+                          onChanged: (value) {
                             setState(() {
                               try {
                                 minRuns = int.parse(value);
-                                prefs.setInt('minRuns', minRuns);
+                                syncToProfile();
                               } on Exception {}
                             });
                           },
@@ -1085,10 +1306,9 @@ class _SettingsScreenState extends State<SettingsScreen> {
                     ],
                   ),
                   Text(
-                    'Current: ' + minRuns.toString(),
+                    'Current: ' + minRuns.toString() + " runs",
                     style: TextStyle(
-                        color: (MediaQuery.of(context).platformBrightness ==
-                                Brightness.dark)
+                        color: (MediaQuery.of(context).platformBrightness == Brightness.dark)
                             ? Colors.grey[400]
                             : Colors.grey[700]),
                   ),
@@ -1099,11 +1319,10 @@ class _SettingsScreenState extends State<SettingsScreen> {
                       Text(downText),
                       Switch(
                         value: justDown,
-                        onChanged: (value) async {
-                          final prefs = await SharedPreferences.getInstance();
+                        onChanged: (value) {
                           setState(() {
                             justDown = value;
-                            prefs.setBool('justDown', justDown);
+                            syncToProfile();
                             if (value) {
                               downText = 'Look for shorter and longer runs';
                             } else {
@@ -1127,10 +1346,19 @@ class _SettingsScreenState extends State<SettingsScreen> {
                               timePace = !timePace;
                             });
                           },
-                          icon: Icon((timePace)
-                              ? Icons.timer_outlined
-                              : Icons.timer_off_outlined))
+                          icon: Icon((timePace) ? Icons.timer_outlined : Icons.timer_off_outlined))
                     ],
+                  ),
+                  TextButton(
+                    child: const Text("Privacy Policy"),
+                    onPressed: () async {
+                      const url = 'https://afoxenrichment.weebly.com/privacy-policy.html';
+                      if (await canLaunch(url)) {
+                        await launch(url);
+                      } else {
+                        throw 'Could not launch $url';
+                      }
+                    },
                   ),
                 ],
               ),
@@ -1153,14 +1381,18 @@ class _SettingsScreenState extends State<SettingsScreen> {
 
 //Screen to display all runs we have on record
 class RunScreen extends StatefulWidget {
-  final Future<List<Run>> runs;
-
-  const RunScreen({Key? key, required this.runs}) : super(key: key);
+  const RunScreen({
+    Key? key,
+  }) : super(key: key);
 
   @override
   State<RunScreen> createState() => _RunScreenState();
 }
 
+//TODO: Implement filter by distance, starting place, etc.
+//Do this by creating a holder list, then they fucntion will use the .where() function to change the holder, without ever accsessing or chanigng the or the original list
+//like here but also with the filter option?
+// https://www.kindacode.com/article/how-to-create-a-filter-search-listview-in-flutter/
 class _RunScreenState extends State<RunScreen> {
   ScrollController myScrollController = ScrollController();
 
@@ -1168,8 +1400,8 @@ class _RunScreenState extends State<RunScreen> {
     allRunsList = await fetchRun();
 
     startingPlaces = getStartingPlaces();
-    allRunsList.sort();
     _syncFavsandHats();
+    allRunsList.sort();
     setState(() {});
   }
 
@@ -1186,148 +1418,104 @@ class _RunScreenState extends State<RunScreen> {
         decoration: BoxDecoration(
           image: DecorationImage(
               fit: BoxFit.fitHeight,
-              colorFilter: ColorFilter.mode(
-                  Colors.black.withOpacity(0.1), BlendMode.dstATop),
+              colorFilter: ColorFilter.mode(Colors.black.withOpacity(0.1), BlendMode.dstATop),
               image: const AssetImage('assets/Map.jpeg')),
         ),
         child: Center(
-            child: FutureBuilder<List<Run>>(
-          future: widget.runs,
-          builder: (context, snapshot) {
-            // ignore: avoid_print
-            if (snapshot.hasError) print(snapshot.error);
-            return snapshot.hasData
-                ? ListView.builder(
-                    controller: myScrollController,
-                    itemCount: allRunsList.length,
-                    itemBuilder: (context, index) {
-                      return Card(
-                        elevation: 5,
-                        child: Stack(
-                          children: <Widget>[
-                            Container(
-                                padding: const EdgeInsets.all(16),
-                                child: Column(
-                                  crossAxisAlignment: CrossAxisAlignment.start,
-                                  children: [
-                                    SizedBox(
-                                      width: MediaQuery.of(context).size.width *
-                                          (.8),
-                                      child: Text(
-                                        allRunsList[index].runName,
-                                        style: const TextStyle(
-                                            fontWeight: FontWeight.bold,
-                                            fontSize: 25),
-                                      ),
+            child: ListView.builder(
+                controller: myScrollController,
+                itemCount: allRunsList.length,
+                itemBuilder: (context, index) {
+                  return InkWell(
+                    child: Card(
+                      elevation: 5,
+                      child: Stack(
+                        children: <Widget>[
+                          Container(
+                              padding: const EdgeInsets.all(16),
+                              child: Column(
+                                crossAxisAlignment: CrossAxisAlignment.start,
+                                children: [
+                                  SizedBox(
+                                    width: MediaQuery.of(context).size.width * (.8),
+                                    child: Text(
+                                      allRunsList[index].runName,
+                                      style:
+                                          const TextStyle(fontWeight: FontWeight.bold, fontSize: 25),
                                     ),
-                                    Text(allRunsList[index]
-                                        .toString(includeName: false)),
-                                    RichText(
-                                        text: TextSpan(children: [
-                                      TextSpan(
-                                        text: "Route #" +
-                                            allRunsList[index]
-                                                .route
-                                                .toString() +
-                                            " ",
-                                      ),
-                                      TextSpan(
-                                          style: const TextStyle(
-                                            color: Colors.blue,
-                                            decoration:
-                                                TextDecoration.underline,
-                                          ),
-                                          text: "Click here for more details.",
-                                          recognizer: TapGestureRecognizer()
-                                            ..onTap = () async {
-                                              var url =
-                                                  "https://www.mappedometer.com/?maproute=" +
-                                                      snapshot
-                                                          .data![index].route
-                                                          .toString();
-                                              if (await canLaunch(url)) {
-                                                await launch(url);
-                                              } else {
-                                                throw 'Could not launch $url';
-                                              }
-                                            }),
-                                    ])),
-                                  ],
-                                )),
-                            Positioned(
-                                child: IconButton(
-                                  icon: (allRunsList[index].favorite)
-                                      ? const Icon(Icons.favorite_rounded,
-                                          color: Colors.redAccent)
-                                      : const Icon(
-                                          Icons.favorite_border_rounded,
-                                          color: Colors.grey,
-                                        ),
-                                  onPressed: () async {
-                                    allRunsList[index].favorite =
-                                        !allRunsList[index].favorite;
-                                    allRunsList[index].hated = false;
-                                    final prefs =
-                                        await SharedPreferences.getInstance();
-                                    if (allRunsList[index].favorite) {
-                                      hateds.remove(
-                                          allRunsList[index].route.toString());
-                                      favorites.add(
-                                          allRunsList[index].route.toString());
-                                    } else {
-                                      favorites.remove(
-                                          allRunsList[index].route.toString());
-                                    }
-                                    await prefs.setStringList(
-                                        'favorites', favorites);
-                                    await prefs.setStringList('hateds', hateds);
-                                    _syncFavsandHats();
-                                    setState(() {});
-                                  },
-                                  tooltip: "Favorite",
-                                ),
-                                right: 1.0),
-                            Positioned(
+                                  ),
+                                  Text(allRunsList[index].toString(includeName: false)),
+                                  RichText(
+                                      text: TextSpan(children: [
+                                    TextSpan(
+                                      text: "Route #" + allRunsList[index].route.toString() + " ",
+                                    ),
+                                  ])),
+                                ],
+                              )),
+                          Positioned(
                               child: IconButton(
-                                icon: (allRunsList[index].hated)
-                                    ? Icon(Icons.sports_kabaddi,
-                                        color: Colors.red[900])
-                                    : const Icon(Icons.sports_kabaddi_outlined,
-                                        color: Colors.grey),
-                                onPressed: () async {
-                                  allRunsList[index].hated =
-                                      !allRunsList[index].hated;
-                                  allRunsList[index].favorite = false;
-                                  final prefs =
-                                      await SharedPreferences.getInstance();
-                                  if (allRunsList[index].hated) {
-                                    favorites.remove(
-                                        allRunsList[index].route.toString());
-                                    hateds.add(
-                                        allRunsList[index].route.toString());
+                                icon: (allRunsList[index].favorite)
+                                    ? const Icon(Icons.favorite_rounded, color: Colors.redAccent)
+                                    : const Icon(
+                                        Icons.favorite_border_rounded,
+                                        color: Colors.grey,
+                                      ),
+                                onPressed: () {
+                                  allRunsList[index].favorite = !allRunsList[index].favorite;
+                                  allRunsList[index].hated = false;
+                                  if (allRunsList[index].favorite) {
+                                    hateds.remove(allRunsList[index].route.toString());
+                                    favorites.add(allRunsList[index].route.toString());
                                   } else {
-                                    hateds.remove(
-                                        allRunsList[index].route.toString());
+                                    favorites.remove(allRunsList[index].route.toString());
                                   }
-                                  await prefs.setStringList(
-                                      'favorites', favorites);
-                                  await prefs.setStringList('hateds', hateds);
+                                  syncToProfile();
                                   _syncFavsandHats();
+                                  allRunsList.sort();
+
                                   setState(() {});
                                 },
-                                tooltip: "Hate",
+                                tooltip: "Favorite",
                               ),
-                              right: 30,
-                            )
-                          ],
-                        ),
-                      );
-                    })
-                : const Center(
-                    child: CircularProgressIndicator(),
+                              right: 1.0),
+                          Positioned(
+                            child: IconButton(
+                              icon: (allRunsList[index].hated)
+                                  ? Icon(Icons.sports_kabaddi, color: Colors.red[900])
+                                  : const Icon(Icons.sports_kabaddi_outlined, color: Colors.grey),
+                              onPressed: () {
+                                allRunsList[index].hated = !allRunsList[index].hated;
+                                allRunsList[index].favorite = false;
+                                if (allRunsList[index].hated) {
+                                  favorites.remove(allRunsList[index].route.toString());
+                                  hateds.add(allRunsList[index].route.toString());
+                                } else {
+                                  hateds.remove(allRunsList[index].route.toString());
+                                }
+                                syncToProfile();
+                                _syncFavsandHats();
+                                allRunsList.sort();
+                                setState(() {});
+                              },
+                              tooltip: "Hate",
+                            ),
+                            right: 30,
+                          )
+                        ],
+                      ),
+                    ),
+                    onLongPress: () async {
+                      var url = "https://www.mappedometer.com/?maproute=" +
+                          allRunsList[index].route.toString();
+                      if (await canLaunch(url)) {
+                        await launch(url);
+                      } else {
+                        throw 'Could not launch $url';
+                      }
+                    },
                   );
-          },
-        )),
+                })),
       ),
       floatingActionButton: FloatingActionButton(
         child: const Icon(Icons.sync),
@@ -1368,7 +1556,7 @@ class _FindLongRunScreenState extends State<FindLongRunScreen> {
     super.initState();
     focusNode1.addListener(() {
       bool hasFocus = focusNode1.hasFocus;
-      if (hasFocus) {
+      if (hasFocus && !Platform.isMacOS) {
         KeyboardOverlay.showOverlay(context);
       } else {
         KeyboardOverlay.removeOverlay();
@@ -1376,7 +1564,7 @@ class _FindLongRunScreenState extends State<FindLongRunScreen> {
     });
     focusNode2.addListener(() {
       bool hasFocus = focusNode2.hasFocus;
-      if (hasFocus) {
+      if (hasFocus && !Platform.isMacOS) {
         KeyboardOverlay.showOverlay(context);
       } else {
         KeyboardOverlay.removeOverlay();
@@ -1400,33 +1588,30 @@ class _FindLongRunScreenState extends State<FindLongRunScreen> {
             int.parse(lengthStr.substring(3, 5)) / 60.0 +
             int.parse(lengthStr.substring(6, 8)) / 3600.0;
         //find the pace in mph
-        double pace = 60.0 / int.parse(paceStr.substring(3, 5)) +
-            int.parse(paceStr.substring(6, 8));
+        double pace = 60.0 / int.parse(paceStr.substring(3, 5)) + int.parse(paceStr.substring(6, 8));
         distance = length * pace;
       } else {
         distance = double.parse(myController.text);
       }
       double margin = 0;
       //If they selected Loops only
-      if (oB == "Loops") {
+      if (outAndBack == "Loops") {
         while (margin <= desiredMargin + .01 ||
             (margin <= maxMargin + .01 && choosen.length < minRuns)) {
           for (Run run in allRunsList) {
             //Make sure you start in the right place and its not an out and back
-            if (run.start.keys.toString() != _defaultStart && run.loop) {
+            if (run.start.keys.toString() != "(" + _defaultStart + ")" && run.loop) {
               //See if they selected shorter runs only
               if (justDown) {
                 //see if it is within the margin of error
-                if (run.distance >= (distance - margin) &&
-                    run.distance <= (distance + margin)) {
+                if (run.distance >= (distance - margin) && run.distance <= (distance + margin)) {
                   //make sure there wont be any repeats
                   if (!choosen.contains(run)) {
                     choosen.add(run);
                   }
                 }
               } else {
-                if (run.distance >= (distance - margin) &&
-                    run.distance <= (distance)) {
+                if (run.distance >= (distance - margin) && run.distance <= (distance)) {
                   //make sure there wont be any repeats
                   if (!choosen.contains(run)) {
                     choosen.add(run);
@@ -1438,27 +1623,25 @@ class _FindLongRunScreenState extends State<FindLongRunScreen> {
           margin += .01;
         }
         //Both out and backs and loops
-      } else if (oB == "Both") {
+      } else if (outAndBack == "Both") {
         while (margin <= desiredMargin + .01 ||
             (margin <= maxMargin + .01 && choosen.length < minRuns)) {
           for (Run run in allRunsList) {
             //Make sure you start in the right place
-            if (run.start.keys.toString() != _defaultStart) {
+            if (run.start.keys.toString() != "(" + _defaultStart + ")") {
               //If its a loop
               if (run.loop) {
                 //See if they selected shorter runs only
                 if (justDown) {
                   //see if it is within the margin of error
-                  if (run.distance >= (distance - margin) &&
-                      run.distance <= (distance + margin)) {
+                  if (run.distance >= (distance - margin) && run.distance <= (distance + margin)) {
                     //make sure there wont be any repeats
                     if (!choosen.contains(run)) {
                       choosen.add(run);
                     }
                   }
                 } else {
-                  if (run.distance >= (distance - margin) &&
-                      run.distance <= (distance)) {
+                  if (run.distance >= (distance - margin) && run.distance <= (distance)) {
                     //make sure there wont be any repeats
                     if (!choosen.contains(run)) {
                       choosen.add(run);
@@ -1483,7 +1666,7 @@ class _FindLongRunScreenState extends State<FindLongRunScreen> {
       } else {
         for (Run run in allRunsList) {
           //Make sure you start in the right place
-          if (run.start.keys.toString() != _defaultStart && !run.loop) {
+          if (run.start.keys.toString() != "(" + _defaultStart + ")" && !run.loop) {
             //If they selected Normal Run
             if (type == "Normal Run" && !run.hill) {
               //See if the run fits
@@ -1501,7 +1684,7 @@ class _FindLongRunScreenState extends State<FindLongRunScreen> {
       //Go to second Screen:
       Navigator.push(
         context,
-        MaterialPageRoute(builder: (context) => const HomeScreenSecondScreen()),
+        MaterialPageRoute(builder: (context) => const ChoosenRunScreen()),
       );
     } on Exception {
       showDialog(
@@ -1545,8 +1728,7 @@ class _FindLongRunScreenState extends State<FindLongRunScreen> {
           decoration: BoxDecoration(
             image: DecorationImage(
                 fit: BoxFit.fitHeight,
-                colorFilter: ColorFilter.mode(
-                    Colors.black.withOpacity(0.1), BlendMode.dstATop),
+                colorFilter: ColorFilter.mode(Colors.black.withOpacity(0.1), BlendMode.dstATop),
                 image: const AssetImage('assets/Map.jpeg')),
           ),
           child: Center(
@@ -1568,9 +1750,7 @@ class _FindLongRunScreenState extends State<FindLongRunScreen> {
                             width: 150,
                             child: TextFormField(
                               controller: timeController,
-                              keyboardType:
-                                  const TextInputType.numberWithOptions(
-                                      decimal: false),
+                              keyboardType: const TextInputType.numberWithOptions(decimal: false),
                               decoration: const InputDecoration(
                                 hintText: '00:00:00',
                                 labelText: "Time: ",
@@ -1585,9 +1765,7 @@ class _FindLongRunScreenState extends State<FindLongRunScreen> {
                             width: 150,
                             child: TextFormField(
                               controller: paceController,
-                              keyboardType:
-                                  const TextInputType.numberWithOptions(
-                                      decimal: false),
+                              keyboardType: const TextInputType.numberWithOptions(decimal: false),
                               decoration: const InputDecoration(
                                 hintText: '00:00:00',
                                 labelText: "Pace: ",
@@ -1606,8 +1784,7 @@ class _FindLongRunScreenState extends State<FindLongRunScreen> {
                           decoration: const InputDecoration(
                             labelText: 'Goal Distance:',
                           ),
-                          keyboardType: const TextInputType.numberWithOptions(
-                              decimal: true),
+                          keyboardType: const TextInputType.numberWithOptions(decimal: true),
                           controller: myController,
                           onSubmitted: (value) {
                             _findLongRun();
@@ -1618,6 +1795,7 @@ class _FindLongRunScreenState extends State<FindLongRunScreen> {
 
                 //Padding
                 const SizedBox(height: 20),
+                const Text("Type of Run:"),
                 DropdownButton(
                   items: oBValues.map<DropdownMenuItem<String>>((String value) {
                     return DropdownMenuItem<String>(
@@ -1626,10 +1804,10 @@ class _FindLongRunScreenState extends State<FindLongRunScreen> {
                     );
                   }).toList(),
                   icon: const Icon(Icons.expand_more_rounded),
-                  value: oB,
+                  value: outAndBack,
                   onChanged: (String? value) {
                     setState(() {
-                      oB = value!;
+                      outAndBack = value!;
                     });
                   },
                 ),
@@ -1657,42 +1835,82 @@ class CalendarPage extends StatefulWidget {
   _CalendarPageState createState() => _CalendarPageState();
 }
 
+//TODO: Button to plan a whole week - need to choose tempo, hard day, hill sprints etc., computer will auto divide the milage into 6 days
+//Follow general pattern of easy, hard/workout, recovery, medium, hard/workout, long run
+//TODO: button to toggle to time/pace mode on calendar?
+//TODO: possibly get rid of calender bc I have the team feature
 class _CalendarPageState extends State<CalendarPage> {
-  late final ValueNotifier<List<Event>> _selectedEvents;
-  CalendarFormat _calendarFormat = CalendarFormat.month;
-  RangeSelectionMode _rangeSelectionMode = RangeSelectionMode
-      .toggledOff; // Can be toggled on/off by longpressing a date
+  late final ValueNotifier<List<Plan>> _selectedPlans;
+  CalendarFormat _calendarFormat = CalendarFormat.twoWeeks;
+  RangeSelectionMode _rangeSelectionMode =
+      RangeSelectionMode.toggledOff; // Can be toggled on/off by longpressing a date
   DateTime _focusedDay = DateTime.now();
   DateTime? _selectedDay;
   DateTime? _rangeStart;
   DateTime? _rangeEnd;
+  bool showAdd = false;
+  final titleController = TextEditingController();
+  final descriptionController = TextEditingController();
+  final distanceController = TextEditingController();
+  final panelController = PanelController();
+  DateTime addDate = DateTime.now();
+  final FocusNode focusNode1 = FocusNode();
 
   @override
   void initState() {
     super.initState();
-
+    focusNode1.addListener(() {
+      bool hasFocus = focusNode1.hasFocus;
+      if (hasFocus && !Platform.isMacOS) {
+        KeyboardOverlay.showOverlay(context);
+      } else {
+        KeyboardOverlay.removeOverlay();
+      }
+    });
     _selectedDay = _focusedDay;
-    _selectedEvents = ValueNotifier(_getEventsForDay(_selectedDay!));
+    _selectedPlans = ValueNotifier(_getPlansForDay(_selectedDay!));
+    //TODO: Fix bug with leftover events from old profiles
+    FirebaseAuth.instance.idTokenChanges().listen((User? user) {
+      if (user == null) {
+        // ignore: prefer_collection_literals
+        kPlans = LinkedHashMap<DateTime, dynamic>();
+      } else {
+        syncFromProfile();
+      }
+    });
   }
 
   @override
   void dispose() {
-    _selectedEvents.dispose();
+    _selectedPlans.dispose();
     super.dispose();
   }
 
-  List<Event> _getEventsForDay(DateTime day) {
+  List<Plan> _getPlansForDay(DateTime day) {
     // Implementation example
-    return kEvents[day] ?? [];
+    return kPlans[day] ?? [];
   }
 
-  List<Event> _getEventsForRange(DateTime start, DateTime end) {
+  List<Plan> _getPlansForRange(DateTime start, DateTime end) {
     // Implementation example
     final days = daysInRange(start, end);
 
     return [
-      for (final d in days) ..._getEventsForDay(d),
+      for (final d in days) ..._getPlansForDay(d),
     ];
+  }
+
+  _selectDate(BuildContext context) async {
+    final DateTime? picked = await showDatePicker(
+        context: context,
+        initialDate: _selectedDay ?? addDate,
+        firstDate: kFirstDay,
+        lastDate: kLastDay);
+    if (picked != null && picked != addDate) {
+      setState(() {
+        addDate = picked;
+      });
+    }
   }
 
   void _onDaySelected(DateTime selectedDay, DateTime focusedDay) {
@@ -1705,7 +1923,7 @@ class _CalendarPageState extends State<CalendarPage> {
         _rangeSelectionMode = RangeSelectionMode.toggledOff;
       });
 
-      _selectedEvents.value = _getEventsForDay(selectedDay);
+      _selectedPlans.value = _getPlansForDay(selectedDay);
     }
   }
 
@@ -1720,79 +1938,685 @@ class _CalendarPageState extends State<CalendarPage> {
 
     // `start` or `end` could be null
     if (start != null && end != null) {
-      _selectedEvents.value = _getEventsForRange(start, end);
+      _selectedPlans.value = _getPlansForRange(start, end);
     } else if (start != null) {
-      _selectedEvents.value = _getEventsForDay(start);
+      _selectedPlans.value = _getPlansForDay(start);
     } else if (end != null) {
-      _selectedEvents.value = _getEventsForDay(end);
+      _selectedPlans.value = _getPlansForDay(end);
     }
   }
 
   @override
   Widget build(BuildContext context) {
     return Scaffold(
+      resizeToAvoidBottomInset: true,
       appBar: AppBar(
         title: const Text('Calendar'),
       ),
       drawer: const NavDrawer(),
-      body: Column(
-        children: [
-          TableCalendar<Event>(
-            firstDay: kFirstDay,
-            lastDay: kLastDay,
-            focusedDay: _focusedDay,
-            selectedDayPredicate: (day) => isSameDay(_selectedDay, day),
-            rangeStartDay: _rangeStart,
-            rangeEndDay: _rangeEnd,
-            calendarFormat: _calendarFormat,
-            rangeSelectionMode: _rangeSelectionMode,
-            eventLoader: _getEventsForDay,
-            startingDayOfWeek: StartingDayOfWeek.monday,
-            calendarStyle: const CalendarStyle(
-              // Use `CalendarStyle` to customize the UI
-              outsideDaysVisible: false,
-            ),
-            onDaySelected: _onDaySelected,
-            onRangeSelected: _onRangeSelected,
-            onFormatChanged: (format) {
-              if (_calendarFormat != format) {
-                setState(() {
-                  _calendarFormat = format;
-                });
-              }
-            },
-            onPageChanged: (focusedDay) {
-              _focusedDay = focusedDay;
-            },
-          ),
-          const SizedBox(height: 8.0),
-          Expanded(
-            child: ValueListenableBuilder<List<Event>>(
-              valueListenable: _selectedEvents,
-              builder: (context, value, _) {
-                return ListView.builder(
-                  itemCount: value.length,
-                  itemBuilder: (context, index) {
-                    return Container(
-                      margin: const EdgeInsets.symmetric(
-                        horizontal: 12.0,
-                        vertical: 4.0,
-                      ),
-                      decoration: BoxDecoration(
-                        border: Border.all(),
-                        borderRadius: BorderRadius.circular(12.0),
-                      ),
-                      child: ListTile(
-                        onTap: () => print('${value[index]}'),
-                        title: Text('${value[index]}'),
-                      ),
-                    );
-                  },
-                );
+      body: SingleChildScrollView(
+        child: Column(
+          children: [
+            const SizedBox(height: 8.0),
+            //Calendar
+            TableCalendar<Plan>(
+              firstDay: kFirstDay,
+              lastDay: kLastDay,
+              focusedDay: _focusedDay,
+              selectedDayPredicate: (day) => isSameDay(_selectedDay, day),
+              rangeStartDay: _rangeStart,
+              rangeEndDay: _rangeEnd,
+              calendarFormat: _calendarFormat,
+              rangeSelectionMode: _rangeSelectionMode,
+              eventLoader: _getPlansForDay,
+              startingDayOfWeek: StartingDayOfWeek.sunday,
+              calendarStyle: const CalendarStyle(
+                // Use `CalendarStyle` to customize the UI
+                outsideDaysVisible: false,
+                markerDecoration: BoxDecoration(color: Colors.cyan, shape: BoxShape.circle),
+              ),
+              onDaySelected: _onDaySelected,
+              onRangeSelected: _onRangeSelected,
+              onFormatChanged: (format) {
+                if (_calendarFormat != format) {
+                  setState(() {
+                    _calendarFormat = format;
+                  });
+                }
+              },
+              onPageChanged: (focusedDay) {
+                _focusedDay = focusedDay;
               },
             ),
-          ),
-        ],
+            //display events for a day
+            Flex(
+              direction: Axis.vertical,
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                Flexible(
+                  fit: FlexFit.loose,
+                  child: ValueListenableBuilder<List<Plan>>(
+                    valueListenable: _selectedPlans,
+                    builder: (context, value, _) {
+                      return ListView.builder(
+                        shrinkWrap: true,
+                        itemCount: value.length,
+                        itemBuilder: (context, index) {
+                          return Container(
+                            margin: const EdgeInsets.symmetric(
+                              horizontal: 12.0,
+                              vertical: 4.0,
+                            ),
+                            decoration: BoxDecoration(
+                              border: Border.all(),
+                              borderRadius: BorderRadius.circular(12.0),
+                            ),
+                            child: ListTile(
+                              // ignore: avoid_print
+                              onLongPress: () {
+                                showDialog(
+                                    context: context,
+                                    builder: (BuildContext context) {
+                                      return AlertDialog(
+                                        content: SizedBox(
+                                          height: MediaQuery.of(context).size.height * .18,
+                                          child: Column(
+                                            mainAxisAlignment: MainAxisAlignment.center,
+                                            children: <Widget>[
+                                              TextButton(
+                                                onPressed: () {
+                                                  titleController.text = value[index].title;
+                                                  descriptionController.text =
+                                                      value[index].description;
+                                                  distanceController.text =
+                                                      value[index].distance.toString();
+                                                  addDate = _selectedDay!;
+                                                  showDialog(
+                                                      context: context,
+                                                      builder: (BuildContext context) {
+                                                        return AlertDialog(
+                                                          content: Stack(
+                                                            children: [
+                                                              Positioned(
+                                                                right: 0,
+                                                                bottom: 0,
+                                                                child: FloatingActionButton(
+                                                                  onPressed: () {
+                                                                    if (titleController.text == "") {
+                                                                      showDialog(
+                                                                          context: context,
+                                                                          builder:
+                                                                              (BuildContext context) {
+                                                                            return AlertDialog(
+                                                                              content: const Text(
+                                                                                  'Please enter a title'),
+                                                                              actions: <Widget>[
+                                                                                TextButton(
+                                                                                  child: const Text(
+                                                                                      'Ok'),
+                                                                                  onPressed: () {
+                                                                                    Navigator.of(
+                                                                                            context)
+                                                                                        .pop();
+                                                                                  },
+                                                                                ),
+                                                                              ],
+                                                                            );
+                                                                          });
+                                                                    } else if (descriptionController
+                                                                            .text ==
+                                                                        "") {
+                                                                      showDialog(
+                                                                          context: context,
+                                                                          builder:
+                                                                              (BuildContext context) {
+                                                                            return AlertDialog(
+                                                                              content: const Text(
+                                                                                  'Please enter a description'),
+                                                                              actions: <Widget>[
+                                                                                TextButton(
+                                                                                  child: const Text(
+                                                                                      'Ok'),
+                                                                                  onPressed: () {
+                                                                                    Navigator.of(
+                                                                                            context)
+                                                                                        .pop();
+                                                                                  },
+                                                                                ),
+                                                                              ],
+                                                                            );
+                                                                          });
+                                                                    } else if (distanceController
+                                                                            .text ==
+                                                                        "") {
+                                                                      showDialog(
+                                                                          context: context,
+                                                                          builder:
+                                                                              (BuildContext context) {
+                                                                            return AlertDialog(
+                                                                              content: const Text(
+                                                                                  'Please enter a distance'),
+                                                                              actions: <Widget>[
+                                                                                TextButton(
+                                                                                  child: const Text(
+                                                                                      'Ok'),
+                                                                                  onPressed: () {
+                                                                                    Navigator.of(
+                                                                                            context)
+                                                                                        .pop();
+                                                                                  },
+                                                                                ),
+                                                                              ],
+                                                                            );
+                                                                          });
+                                                                    } else {
+                                                                      value[index] = Plan(
+                                                                          titleController.text,
+                                                                          descriptionController.text,
+                                                                          double.parse(
+                                                                              distanceController
+                                                                                  .text));
+                                                                      setState(() {});
+                                                                      titleController.clear();
+                                                                      descriptionController.clear();
+                                                                      distanceController.clear();
+                                                                      addDate = DateTime.now();
+                                                                      Navigator.of(context).pop();
+                                                                      Navigator.of(context).pop();
+                                                                      syncToProfile();
+                                                                    }
+                                                                  },
+                                                                  child: const Icon(Icons.save),
+                                                                ),
+                                                              ),
+                                                              SizedBox(
+                                                                width: MediaQuery.of(context)
+                                                                        .size
+                                                                        .width *
+                                                                    .5,
+                                                                height: MediaQuery.of(context)
+                                                                        .size
+                                                                        .height *
+                                                                    .4,
+                                                                child: Center(
+                                                                  child: Column(
+                                                                    mainAxisAlignment:
+                                                                        MainAxisAlignment.center,
+                                                                    children: <Widget>[
+                                                                      TextField(
+                                                                        controller: titleController,
+                                                                        decoration:
+                                                                            const InputDecoration(
+                                                                          labelText: "Title",
+                                                                          hintText:
+                                                                              'Ex. "Medium Day"',
+                                                                        ),
+                                                                      ),
+                                                                      //Description of run
+                                                                      TextField(
+                                                                        controller:
+                                                                            descriptionController,
+                                                                        maxLines: null,
+                                                                        keyboardType:
+                                                                            TextInputType.multiline,
+                                                                        decoration:
+                                                                            const InputDecoration(
+                                                                          labelText: "Descripiton",
+                                                                          hintText:
+                                                                              'Ex. "Aerobic Run"',
+                                                                        ),
+                                                                      ),
+                                                                      //Distance of run
+                                                                      TextField(
+                                                                        controller:
+                                                                            distanceController,
+                                                                        decoration:
+                                                                            const InputDecoration(
+                                                                          labelText: "Distance",
+                                                                          hintText: 'Ex. "8"',
+                                                                        ),
+                                                                      ),
+                                                                      //Date of run
+                                                                      ElevatedButton(
+                                                                        onPressed: () =>
+                                                                            _selectDate(context),
+                                                                        child:
+                                                                            const Text('Select date'),
+                                                                      ),
+
+                                                                      TextButton(
+                                                                          onPressed: () {
+                                                                            setState(() {});
+                                                                            titleController.clear();
+                                                                            descriptionController
+                                                                                .clear();
+                                                                            distanceController
+                                                                                .clear();
+                                                                            addDate = DateTime.now();
+                                                                            Navigator.of(context)
+                                                                                .pop();
+                                                                          },
+                                                                          child:
+                                                                              const Text('Cancel')),
+                                                                    ],
+                                                                  ),
+                                                                ),
+                                                              ),
+                                                            ],
+                                                          ),
+                                                        );
+                                                      });
+                                                },
+                                                child: const Text("Edit Run"),
+                                              ),
+                                              //Delet Run Button
+                                              TextButton(
+                                                onPressed: () {
+                                                  showDialog(
+                                                      context: context,
+                                                      builder: (BuildContext context) {
+                                                        return AlertDialog(
+                                                          content: const Text(
+                                                              "Are you sure you want to delete this Run?"),
+                                                          actions: <Widget>[
+                                                            //cancel
+                                                            TextButton(
+                                                              onPressed: () =>
+                                                                  Navigator.of(context).pop(),
+                                                              child: const Text("Cancel"),
+                                                            ),
+                                                            //Delete run button
+                                                            TextButton(
+                                                              onPressed: () {
+                                                                kPlans[_selectedDay]?.removeAt(index);
+                                                                setState(() {});
+                                                                Navigator.of(context).pop();
+                                                                Navigator.of(context).pop();
+                                                                syncToProfile();
+                                                              },
+                                                              child: const Text("Delete Run"),
+                                                            ),
+                                                          ],
+                                                        );
+                                                      });
+                                                },
+                                                child: const Text("Delete Run"),
+                                              ),
+                                              //Cancel Button
+                                              TextButton(
+                                                onPressed: () {
+                                                  Navigator.of(context).pop();
+                                                },
+                                                child: const Text("Cancel"),
+                                              ),
+                                            ],
+                                          ),
+                                        ),
+                                      );
+                                    });
+                              },
+                              title: Text('${value[index]}'),
+                              leading: (value[index].toString().contains("bike"))
+                                  ? const Icon(Icons.directions_bike)
+                                  : const Icon(Icons.directions_run),
+                            ),
+                          );
+                        },
+                      );
+                    },
+                  ),
+                ),
+              ],
+            ),
+            //Adding a run
+            //TODO: Fix this, maybe by adding in the scroll view inside, or making some kind of custom popup widegt?
+            //Use a Modal bottom sheet: https://api.flutter.dev/flutter/material/showModalBottomSheet.html
+            Visibility(
+              //Basically just get rid of the slidgin up widget on mac os
+              child: (Platform.isMacOS)
+                  ? (Stack(
+                      children: [
+                        Center(
+                          child: Column(
+                            mainAxisAlignment: MainAxisAlignment.start,
+                            children: <Widget>[
+                              //Title of slide up
+                              Text(
+                                "Add a Run",
+                                style: TextStyle(
+                                    color: Theme.of(context).colorScheme.primary, fontSize: 20),
+                                softWrap: true,
+                              ),
+                              //Title of run
+                              SizedBox(
+                                width: MediaQuery.of(context).size.width * .8,
+                                child: TextField(
+                                  controller: titleController,
+                                  decoration: const InputDecoration(
+                                    labelText: "Title",
+                                    hintText: 'Ex. "Medium Day"',
+                                  ),
+                                ),
+                              ),
+
+                              //Description of run
+                              SizedBox(
+                                width: MediaQuery.of(context).size.width * .8,
+                                child: TextField(
+                                  controller: descriptionController,
+                                  maxLines: null,
+                                  keyboardType: TextInputType.multiline,
+                                  decoration: const InputDecoration(
+                                    labelText: "Descripiton",
+                                    hintText: 'Ex. "Aerobic Run"',
+                                  ),
+                                  focusNode: focusNode1,
+                                ),
+                              ),
+                              SizedBox(
+                                width: MediaQuery.of(context).size.width * .8,
+                                child: Row(
+                                  children: <Widget>[
+                                    //Distance of run
+                                    SizedBox(
+                                      width: MediaQuery.of(context).size.width * .35,
+                                      child: TextField(
+                                        controller: distanceController,
+                                        decoration: const InputDecoration(
+                                          labelText: "Distance",
+                                          hintText: 'Ex. "8"',
+                                        ),
+                                      ),
+                                    ),
+                                    //Date of run
+                                    SizedBox(
+                                      width: MediaQuery.of(context).size.width * .35,
+                                      child: ElevatedButton(
+                                        onPressed: () => _selectDate(context),
+                                        child: const Text('Select date'),
+                                      ),
+                                    ),
+                                  ],
+                                  mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                                ),
+                              ),
+                              SizedBox(
+                                width: MediaQuery.of(context).size.width * .8,
+                                child:
+                                    Row(mainAxisAlignment: MainAxisAlignment.spaceBetween, children: [
+                                  //Cancel Button
+                                  TextButton(
+                                      onPressed: () {
+                                        showAdd = !showAdd;
+                                        setState(() {});
+                                        titleController.clear();
+                                        descriptionController.clear();
+                                        distanceController.clear();
+                                        addDate = DateTime.now();
+                                      },
+                                      child: const Text('Cancel')),
+                                  //Save button
+                                  ElevatedButton(
+                                    onPressed: () {
+                                      if (titleController.text == "") {
+                                        showDialog(
+                                            context: context,
+                                            builder: (BuildContext context) {
+                                              return AlertDialog(
+                                                content: const Text('Please enter a title'),
+                                                actions: <Widget>[
+                                                  TextButton(
+                                                    child: const Text('Ok'),
+                                                    onPressed: () {
+                                                      Navigator.of(context).pop();
+                                                    },
+                                                  ),
+                                                ],
+                                              );
+                                            });
+                                      } else if (descriptionController.text == "") {
+                                        showDialog(
+                                            context: context,
+                                            builder: (BuildContext context) {
+                                              return AlertDialog(
+                                                content: const Text('Please enter a description'),
+                                                actions: <Widget>[
+                                                  TextButton(
+                                                    child: const Text('Ok'),
+                                                    onPressed: () {
+                                                      Navigator.of(context).pop();
+                                                    },
+                                                  ),
+                                                ],
+                                              );
+                                            });
+                                      } else if (distanceController.text == "") {
+                                        showDialog(
+                                            context: context,
+                                            builder: (BuildContext context) {
+                                              return AlertDialog(
+                                                content: const Text('Please enter a distance'),
+                                                actions: <Widget>[
+                                                  TextButton(
+                                                    child: const Text('Ok'),
+                                                    onPressed: () {
+                                                      Navigator.of(context).pop();
+                                                    },
+                                                  ),
+                                                ],
+                                              );
+                                            });
+                                      } else {
+                                        addScheduledRun(
+                                            titleController.text,
+                                            descriptionController.text,
+                                            double.parse(distanceController.text),
+                                            addDate);
+                                        showAdd = !showAdd;
+                                        _getPlansForDay(_selectedDay!);
+                                        setState(() {});
+                                        titleController.clear();
+                                        descriptionController.clear();
+                                        distanceController.clear();
+                                        addDate = DateTime.now();
+                                      }
+                                    },
+                                    child: const Text("Add Run"),
+                                  ),
+                                ]),
+                              ),
+                            ],
+                          ),
+                        ),
+                      ],
+                    ))
+                  : (SlidingUpPanel(
+                      margin: const EdgeInsets.all(8),
+                      maxHeight: MediaQuery.of(context).size.height * .5,
+                      minHeight: MediaQuery.of(context).size.height * .3,
+                      panelSnapping: false,
+                      controller: panelController,
+                      border: Border.all(color: Theme.of(context).colorScheme.onBackground),
+                      borderRadius: const BorderRadius.all(
+                        Radius.circular(10.0),
+                      ),
+                      panel: Stack(
+                        children: [
+                          Center(
+                            child: Column(
+                              mainAxisAlignment: MainAxisAlignment.start,
+                              children: <Widget>[
+                                //Title of slide up
+                                Text(
+                                  "Add a Run",
+                                  style: TextStyle(
+                                      color: Theme.of(context).colorScheme.primary, fontSize: 20),
+                                  softWrap: true,
+                                ),
+                                //Title of run
+                                SizedBox(
+                                  width: MediaQuery.of(context).size.width * .8,
+                                  child: TextField(
+                                    controller: titleController,
+                                    decoration: const InputDecoration(
+                                      labelText: "Title",
+                                      hintText: 'Ex. "Medium Day"',
+                                    ),
+                                  ),
+                                ),
+
+                                //Description of run
+                                SizedBox(
+                                  width: MediaQuery.of(context).size.width * .8,
+                                  child: TextField(
+                                    controller: descriptionController,
+                                    maxLines: null,
+                                    keyboardType: TextInputType.multiline,
+                                    decoration: const InputDecoration(
+                                      labelText: "Descripiton",
+                                      hintText: 'Ex. "Aerobic Run"',
+                                    ),
+                                    focusNode: focusNode1,
+                                  ),
+                                ),
+                                SizedBox(
+                                  width: MediaQuery.of(context).size.width * .8,
+                                  child: Row(
+                                    children: <Widget>[
+                                      //Distance of run
+                                      SizedBox(
+                                        width: MediaQuery.of(context).size.width * .35,
+                                        child: TextField(
+                                          controller: distanceController,
+                                          decoration: const InputDecoration(
+                                            labelText: "Distance",
+                                            hintText: 'Ex. "8"',
+                                          ),
+                                        ),
+                                      ),
+                                      //Date of run
+                                      SizedBox(
+                                        width: MediaQuery.of(context).size.width * .35,
+                                        child: ElevatedButton(
+                                          onPressed: () => _selectDate(context),
+                                          child: const Text('Select date'),
+                                        ),
+                                      ),
+                                    ],
+                                    mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                                  ),
+                                ),
+                                SizedBox(
+                                  width: MediaQuery.of(context).size.width * .8,
+                                  child: Row(
+                                      mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                                      children: [
+                                        //Cancel Button
+                                        TextButton(
+                                            onPressed: () {
+                                              showAdd = !showAdd;
+                                              setState(() {});
+                                              titleController.clear();
+                                              descriptionController.clear();
+                                              distanceController.clear();
+                                              addDate = DateTime.now();
+                                            },
+                                            child: const Text('Cancel')),
+                                        //Save button
+                                        ElevatedButton(
+                                          onPressed: () {
+                                            if (titleController.text == "") {
+                                              showDialog(
+                                                  context: context,
+                                                  builder: (BuildContext context) {
+                                                    return AlertDialog(
+                                                      content: const Text('Please enter a title'),
+                                                      actions: <Widget>[
+                                                        TextButton(
+                                                          child: const Text('Ok'),
+                                                          onPressed: () {
+                                                            Navigator.of(context).pop();
+                                                          },
+                                                        ),
+                                                      ],
+                                                    );
+                                                  });
+                                            } else if (descriptionController.text == "") {
+                                              showDialog(
+                                                  context: context,
+                                                  builder: (BuildContext context) {
+                                                    return AlertDialog(
+                                                      content:
+                                                          const Text('Please enter a description'),
+                                                      actions: <Widget>[
+                                                        TextButton(
+                                                          child: const Text('Ok'),
+                                                          onPressed: () {
+                                                            Navigator.of(context).pop();
+                                                          },
+                                                        ),
+                                                      ],
+                                                    );
+                                                  });
+                                            } else if (distanceController.text == "") {
+                                              showDialog(
+                                                  context: context,
+                                                  builder: (BuildContext context) {
+                                                    return AlertDialog(
+                                                      content: const Text('Please enter a distance'),
+                                                      actions: <Widget>[
+                                                        TextButton(
+                                                          child: const Text('Ok'),
+                                                          onPressed: () {
+                                                            Navigator.of(context).pop();
+                                                          },
+                                                        ),
+                                                      ],
+                                                    );
+                                                  });
+                                            } else {
+                                              addScheduledRun(
+                                                  titleController.text,
+                                                  descriptionController.text,
+                                                  double.parse(distanceController.text),
+                                                  addDate);
+                                              showAdd = !showAdd;
+                                              _getPlansForDay(_selectedDay!);
+                                              setState(() {});
+                                              titleController.clear();
+                                              descriptionController.clear();
+                                              distanceController.clear();
+                                              addDate = DateTime.now();
+                                            }
+                                          },
+                                          child: const Text("Add Run"),
+                                        ),
+                                      ]),
+                                ),
+                              ],
+                            ),
+                          ),
+                        ],
+                      ),
+                      color: Theme.of(context).scaffoldBackgroundColor,
+                    )),
+              visible: showAdd,
+            ),
+          ],
+        ),
+      ),
+
+      //Add button
+      floatingActionButton: Visibility(
+        visible: !showAdd,
+        child: FloatingActionButton(
+          onPressed: () {
+            showAdd = true;
+
+            setState(() {});
+          },
+          child: const Icon(Icons.add),
+        ),
       ),
     );
   }
@@ -1838,22 +2662,18 @@ class Run implements Comparable<Run> {
 
     return Run(
       runName: json['name'],
-      route: int.parse(json['route']),
-      distance: double.parse(json['distance']),
+      route: json['route'],
+      distance: (json['distance'] is double) ? json['distance'] : json['distance'].toDouble(),
       elevation: (json['elevation gain'] == "")
           ? 'No Elevation Data Included'
           : json['elevation gain'].toString(),
       start: {json['starting place']: json['(long, lat)'].split(',')},
       loop: json['loop'],
-      hill: (json['hill repeats'] == "") ? false : true,
-      warmUp: (json['warm up'] == "") ? false : true,
-      steepness: (json['steepness'].toDouble()),
-      hated: (json['hated'] == "")
-          ? (hateds.contains(json['route']) ? true : false)
-          : true,
-      favorite: (json['favorite'] == "")
-          ? (favorites.contains(json['route']) ? true : false)
-          : true,
+      hill: json['hill repeats'],
+      warmUp: json['warm up'],
+      steepness: json['steepness'].toDouble(),
+      hated: (json['hated']) ? (hateds.contains(json['route']) ? true : false) : false,
+      favorite: (json['favorite']) ? (favorites.contains(json['route']) ? true : false) : false,
       surfaces: surface,
     );
   }
@@ -1929,19 +2749,16 @@ class Run implements Comparable<Run> {
   }
 }
 
-List<Run> decodeRun(String responseBody) {
-  final parsed = json.decode(responseBody).cast<Map<String, dynamic>>();
-  return parsed.map<Run>((json) => Run.fromMap(json)).toList();
-}
-
 Future<List<Run>> fetchRun() async {
-  final response = await http.get(Uri.parse(
-      'https://script.google.com/macros/s/AKfycbxBvVbFgVMV5cOpj5ldtsT4sFeJY5lME7ofLoRoIqwiUkgZextFjICqKUE6kINm6wlQ/exec'));
-  if (response.statusCode == 200) {
-    return decodeRun(response.body);
-  } else {
-    throw Exception('Unable to fetch data from the REST API');
+  List<Run> ret = [];
+  CollectionReference _collectionRef = FirebaseFirestore.instance.collection('Runs');
+  QuerySnapshot querySnapshot = await _collectionRef.get();
+  final allData = querySnapshot.docs.map((doc) => doc.data()).toList();
+  for (Object? data in allData) {
+    Map<String, dynamic> dataMap = data as Map<String, dynamic>;
+    ret.add(Run.fromMap(dataMap));
   }
+  return ret;
 }
 
 void _syncFavsandHats() {
@@ -1965,9 +2782,9 @@ void _syncFavsandHats() {
   }
 }
 
+//Menu bar
 class NavDrawer extends StatelessWidget {
   const NavDrawer({Key? key}) : super(key: key);
-
   @override
   Widget build(BuildContext context) {
     return Drawer(
@@ -1991,42 +2808,45 @@ class NavDrawer extends StatelessWidget {
             ),
           ),
           ListTile(
-            leading: const Icon(Icons.home),
+            leading: const SizedBox(width: 20, child: Icon(Icons.home)),
             title: const Text('Home'),
             onTap: () => {
-              Navigator.push(
-                context,
-                MaterialPageRoute(
-                    builder: (context) => const MyHomePage(
-                          title: 'Run Finder',
-                        )),
-              )
+              FirebaseAuth.instance.authStateChanges().listen((User? user) {
+                if (user == null) {
+                  //Signed out
+                  Navigator.push(
+                    context,
+                    MaterialPageRoute(
+                        builder: (context) => const MyHomePage(
+                              title: "Run Finder",
+                            )),
+                  );
+                } else {
+                  Navigator.push(
+                    context,
+                    MaterialPageRoute(
+                        builder: (context) => MyHomePage(title: user.displayName! + "'s Run Finder")),
+                  );
+                }
+              })
             },
           ),
           ListTile(
-            leading: const Icon(Icons.near_me),
+            leading: const SizedBox(width: 20, child: Icon(Icons.near_me)),
             title: const Text('Find a Location'),
             onTap: () => {
               Navigator.push(
-                  context,
-                  MaterialPageRoute(
-                      builder: (context) => const FindLongRunScreen()))
+                  context, MaterialPageRoute(builder: (context) => const FindLongRunScreen()))
             },
           ),
           ListTile(
-            leading: const Icon(Icons.list_alt),
+            leading: const SizedBox(width: 20, child: Icon(Icons.list_alt)),
             title: const Text('List of Runs'),
-            onTap: () => {
-              Navigator.push(
-                  context,
-                  MaterialPageRoute(
-                      builder: (context) => RunScreen(
-                            runs: fetchRun(),
-                          )))
-            },
+            onTap: () =>
+                {Navigator.push(context, MaterialPageRoute(builder: (context) => const RunScreen()))},
           ),
           ListTile(
-            leading: const Icon(Icons.calendar_today),
+            leading: const SizedBox(width: 20, child: Icon(Icons.calendar_today)),
             title: const Text('Calendar'),
             onTap: () => {
               Navigator.push(
@@ -2036,13 +2856,62 @@ class NavDrawer extends StatelessWidget {
             },
           ),
           ListTile(
-            leading: const Icon(Icons.settings),
+            leading: const SizedBox(width: 20, child: Icon(Icons.settings)),
             title: const Text('Settings'),
             onTap: () => {
               Navigator.push(
                 context,
                 MaterialPageRoute(builder: (context) => const SettingsScreen()),
               )
+            },
+          ),
+          Visibility(
+            visible: Platform.isMacOS,
+            child: ListTile(
+                leading: SizedBox(
+                  width: 20,
+                  child: Icon(Icons.groups,
+                      color: (FirebaseAuth.instance.currentUser != null)
+                          ? Theme.of(context).iconTheme.color
+                          : Colors.grey),
+                ),
+                title: Text(
+                  'Team',
+                  style: TextStyle(
+                      color: (FirebaseAuth.instance.currentUser != null)
+                          ? Theme.of(context).iconTheme.color
+                          : Colors.grey),
+                ),
+                onTap: () => {
+                      if (FirebaseAuth.instance.currentUser != null)
+                        {
+                          Navigator.push(
+                            context,
+                            MaterialPageRoute(builder: (context) => const TeamPage()),
+                          )
+                        }
+                      else
+                        {
+                          showDialog(
+                              context: context,
+                              builder: (context) => AlertDialog(
+                                      title: const Text("Must be logged in to access team feature"),
+                                      actions: <Widget>[
+                                        TextButton(
+                                            onPressed: Navigator.of(context).pop,
+                                            child: const Text("Ok"))
+                                      ]))
+                        }
+                    }),
+          ),
+          ListTile(
+            leading: const SizedBox(width: 20, child: Icon(Icons.person)),
+            title: const Text('Profile'),
+            onTap: () => {
+              Navigator.push(
+                context,
+                MaterialPageRoute(builder: (context) => const LoginPage()),
+              ),
             },
           ),
         ],
@@ -2081,10 +2950,7 @@ class TimeTextInputFormatter extends TextInputFormatter {
           rightChunk = value.substring(6, 7) + ":" + value.substring(7);
         } else if (value.substring(0, 4) == '00:0') {
           leftChunk = '00:';
-          rightChunk = value.substring(4, 5) +
-              value.substring(6, 7) +
-              ":" +
-              value.substring(7);
+          rightChunk = value.substring(4, 5) + value.substring(6, 7) + ":" + value.substring(7);
         } else if (value.substring(0, 3) == '00:') {
           leftChunk = '0';
           rightChunk = value.substring(3, 4) +
@@ -2165,22 +3031,30 @@ class TimeTextInputFormatter extends TextInputFormatter {
   }
 }
 
-class Event {
+class Plan {
   final String title;
+  final String description;
+  final double distance;
 
-  const Event(this.title);
+  const Plan(this.title, this.description, this.distance);
 
   @override
-  String toString() => title;
+  String toString() {
+    return title + ": " + distance.toString() + " miles" "\n" + description;
+  }
+
+//What we're using in the teams database
+  String toDatabaseString() {
+    return title + ": " + description + ", " + distance.toString() + " miles";
+  }
+
+//not really json, but its close enough
+  String toJson() {
+    return title + ":" + description + ":" + distance.toString();
+  }
 }
 
-/// Example events.
-///
-/// Using a [LinkedHashMap] is highly recommended if you decide to use a map.
-//TODO: add in runs or some better list? Import from prefs the last month and the future month
-final kEvents = LinkedHashMap<DateTime, List<Event>>();
-//TODO: Add in a way to add runs
-//TODO: Possibly sync with garmin to have completed runs?
+//TODO: Possibly sync with garmin to have completed runs in calendar?
 
 int getHashCode(DateTime key) {
   return key.day * 1000000 + key.month * 10000 + key.year;
@@ -2195,7 +3069,7 @@ List<DateTime> daysInRange(DateTime first, DateTime last) {
   );
 }
 
-//Get Location Function
+//Gets the location of the user
 Future<Position> _determinePosition() async {
   bool serviceEnabled;
   LocationPermission permission;
@@ -2231,4 +3105,106 @@ Future<Position> _determinePosition() async {
   // When we reach here, permissions are granted and we can
   // continue accessing the position of the device.
   return await Geolocator.getCurrentPosition();
+}
+
+void addScheduledRun(String title, String description, double distance, DateTime date) {
+  if (kPlans[date] != null) {
+    kPlans[date]!.add(Plan(title, description, distance));
+  } else {
+    kPlans[date] = <Plan>[Plan(title, description, distance)];
+  }
+  syncToProfile();
+}
+
+//TODO: Implement this sync from cloud:
+//When to do it tho? like all the time, will it replace duplicates?
+//Do it when the user refreshes the page(through a swipe up) or starts the app or opens calendar page
+void syncAssignedRunsFromTeam() async {}
+
+void wontSync() {
+  runApp(MaterialApp(
+      home: AlertDialog(
+    content: const Text("Error syncing to server."),
+    actions: [
+      TextButton(
+          onPressed: () {
+            main();
+          },
+          child: const Text("Try again"))
+    ],
+  )));
+}
+
+//Function to save all of users info, prefrences to the cloud(document with uid as name)
+void syncToProfile() {
+  User? user = FirebaseAuth.instance.currentUser;
+  if (user != null) {
+    CollectionReference _collectionRef = FirebaseFirestore.instance.collection('Users');
+    DocumentReference doc = _collectionRef.doc(user.uid);
+    List<String> events = [];
+    kPlans.forEach((key, value) {
+      for (Plan plan in value) {
+        events.add(key.toString() + ":" + plan.toJson());
+      }
+    });
+    Map<String, dynamic> info = {
+      "Favorites": favorites,
+      "Hateds": hateds,
+      "desiredMargin": desiredMargin,
+      "_defaultStart": _defaultStart,
+      "maxMargin": maxMargin,
+      "justDown": justDown,
+      "minRuns": minRuns,
+      "kPlans": events,
+      "coach": coach,
+      "team": team,
+      "group": group,
+    };
+    doc.set(info);
+  }
+}
+
+//Function to get all data from the user's document(found through uid) and sync it to the device
+void syncFromProfile() async {
+  User? user = FirebaseAuth.instance.currentUser;
+  if (user != null) {
+    CollectionReference _collectionRef = FirebaseFirestore.instance.collection('Users');
+    Future<DocumentSnapshot<Object?>> doc = _collectionRef.doc(user.uid).get();
+    Map<String, dynamic> data;
+    doc.then((DocumentSnapshot documentSnapshot) {
+      if (documentSnapshot.exists) {
+        data = documentSnapshot.data() as Map<String, dynamic>;
+        favorites = data["Favorites"].cast<String>();
+        hateds = data["Hateds"].cast<String>();
+        maxMargin = data["maxMargin"] as double;
+        justDown = data["justDown"] as bool;
+        minRuns = data["minRuns"] as int;
+        desiredMargin = data["desiredMargin"] as double;
+        _defaultStart = data["_defaultStart"] as String;
+        List<String> events = data["kPlans"].cast<String>() ?? [];
+        for (String plan in events) {
+          int index = plan.indexOf(":", 20);
+          int index2 = plan.indexOf(":", index + 1);
+          int index3 = plan.indexOf(":", index2 + 1);
+          DateTime date = DateTime.parse(plan.substring(0, index));
+          if (!date.isBefore(kFirstDay) || !date.isAfter(kLastDay)) {
+            String title = plan.substring(index + 1, index2);
+            String description = plan.substring(index2 + 1, index3);
+            double distance = double.parse(plan.substring(index3 + 1));
+            Plan eventForm = Plan(title, description, distance);
+            if (kPlans[date] != null) {
+              if (kPlans[date].toString().contains(eventForm.toString()) == false) {
+                kPlans[date]!.add(eventForm);
+              }
+            } else {
+              kPlans[date] = <Plan>[eventForm];
+            }
+          }
+        }
+        coach = data["coach"];
+        group = data["group"];
+        team = data["team"];
+      }
+    });
+  }
 }
